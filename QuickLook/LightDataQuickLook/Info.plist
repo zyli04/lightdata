@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>LightDataQuickLook</string>
+  <key>CFBundleIdentifier</key>
+  <string>local.lightdata.quicklook</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>LightDataQuickLook</string>
+  <key>CFBundlePackageType</key>
+  <string>BNDL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>0.1.0</string>
+  <key>QLSupportedContentTypes</key>
+  <array>
+    <string>public.comma-separated-values-text</string>
+    <string>public.tab-separated-values-text</string>
+    <string>public.json</string>
+    <string>dyn.ah62d4rv4ge80g55</string>
+  </array>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>csv</string>
+        <string>tsv</string>
+        <string>json</string>
+        <string>jsonl</string>
+        <string>ndjson</string>
+      </array>
+      <key>CFBundleTypeRole</key>
+      <string>QLGenerator</string>
+    </dict>
+  </array>
+</dict>
+</plist>
