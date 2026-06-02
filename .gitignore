@@ -13,3 +13,6 @@ DerivedData/
 
 # Local LightData sidecar metadata from manual testing
 .lightdata/
+
+# Visual brainstorming companion scratch files
+.superpowers/

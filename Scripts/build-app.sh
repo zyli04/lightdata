@@ -54,11 +54,15 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
         <string>json</string>
         <string>jsonl</string>
         <string>xlsx</string>
+        <string>parquet</string>
+        <string>pq</string>
       </array>
     </dict>
   </array>
 </dict>
 </plist>
 PLIST
+
+codesign --force --deep --sign - "$APP_DIR"
 
 echo "Built $APP_DIR"

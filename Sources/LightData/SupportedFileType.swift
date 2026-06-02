@@ -6,6 +6,8 @@ enum SupportedFileType {
         UTType(filenameExtension: "tsv") ?? .tabSeparatedText,
         .json,
         UTType(filenameExtension: "jsonl") ?? .text,
-        UTType(filenameExtension: "xlsx") ?? .data
+        UTType(filenameExtension: "xlsx") ?? .data,
+        UTType(filenameExtension: "parquet") ?? .data,
+        UTType(filenameExtension: "pq") ?? .data
     ]
 }

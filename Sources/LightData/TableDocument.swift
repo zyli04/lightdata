@@ -6,6 +6,7 @@ enum TableFileFormat: Equatable {
     case json
     case jsonl
     case xlsx
+    case parquet
 
     var displayName: String {
         switch self {
@@ -14,6 +15,7 @@ enum TableFileFormat: Equatable {
         case .json: "JSON"
         case .jsonl: "JSONL"
         case .xlsx: "XLSX"
+        case .parquet: "Parquet"
         }
     }
 
@@ -97,6 +99,7 @@ enum TableDocumentError: LocalizedError {
     case emptyFile
     case saveUnsupported(String)
     case invalidJSON
+    case invalidParquet(String)
     case fileChangedExternally(URL)
 
     var errorDescription: String? {
@@ -109,6 +112,8 @@ enum TableDocumentError: LocalizedError {
             reason
         case .invalidJSON:
             "JSON must be an array of objects or JSON Lines object records."
+        case .invalidParquet(let reason):
+            "Could not read Parquet file: \(reason)"
         case .fileChangedExternally(let url):
             "\(url.lastPathComponent) was modified outside LightData after it was opened. Reopen the file before saving to avoid overwriting newer changes."
         }
@@ -148,6 +153,9 @@ struct TableDocument {
         case "xlsx":
             let table = try XLSXReader.readFirstSheet(url: url)
             return TableDocument(url: url, format: .xlsx, headers: table.headers, rows: table.rows, readOnly: true, sheetName: table.sheetName, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+        case "parquet", "pq":
+            let table = try ParquetReader.read(url: url)
+            return TableDocument(url: url, format: .parquet, headers: table.headers, rows: table.rows, readOnly: true, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
         default:
             throw TableDocumentError.unsupportedFile(url)
         }
@@ -183,6 +191,20 @@ struct TableDocument {
         dirty = true
     }
 
+    mutating func moveRows(_ indexes: IndexSet, to target: Int) {
+        guard !readOnly else { return }
+        let sorted = indexes.sorted().filter { rows.indices.contains($0) }
+        guard !sorted.isEmpty else { return }
+        let moving = sorted.map { rows[$0] }
+        let removedBefore = sorted.filter { $0 < target }.count
+        for index in sorted.reversed() {
+            rows.remove(at: index)
+        }
+        let insertAt = min(max(target - removedBefore, 0), rows.count)
+        rows.insert(contentsOf: moving, at: insertAt)
+        dirty = true
+    }
+
     mutating func renameColumn(at index: Int, to newName: String) {
         guard !readOnly, headers.indices.contains(index) else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -196,6 +218,23 @@ struct TableDocument {
         headers.remove(at: index)
         for rowIndex in rows.indices where rows[rowIndex].indices.contains(index) {
             rows[rowIndex].remove(at: index)
+        }
+        dirty = true
+    }
+
+    mutating func reorderColumns(to order: [Int]) {
+        guard !readOnly,
+              order.count == headers.count,
+              Set(order) == Set(headers.indices) else {
+            return
+        }
+        guard order != Array(headers.indices) else { return }
+
+        headers = order.map { headers[$0] }
+        rows = rows.map { row in
+            order.map { columnIndex in
+                columnIndex < row.count ? row[columnIndex] : ""
+            }
         }
         dirty = true
     }
@@ -237,6 +276,8 @@ struct TableDocument {
             try JSONTableParser.writeJSONLines(url: url, headers: headers, rows: rows, encoding: openInfo.encoding ?? .utf8, lineEnding: openInfo.lineEnding ?? .lf)
         case .xlsx:
             throw TableDocumentError.saveUnsupported("XLSX editing is intentionally disabled in this MVP.")
+        case .parquet:
+            throw TableDocumentError.saveUnsupported("Parquet editing is intentionally disabled in this MVP.")
         }
         dirty = false
         loadedModificationDate = Self.modificationDate(for: url)

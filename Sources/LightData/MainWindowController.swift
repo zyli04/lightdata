@@ -1,20 +1,199 @@
 import AppKit
 
+protocol DataCellMouseHandling: AnyObject {
+    func dataCellControlShouldHandleMouseDown(visibleRow: Int, columnIndex: Int, event: NSEvent) -> Bool
+}
+
 final class DataCellTextField: NSTextField {
+    weak var mouseHandler: DataCellMouseHandling?
+    var visibleRow = 0
     var documentRow = 0
     var columnIndex = 0
     var rawValue = ""
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .arrow)
+    }
+
+    // Let mouse events fall through to the table view so row-number clicks/drags
+    // are handled in one place (selection + reorder).
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        _ = mouseHandler?.dataCellControlShouldHandleMouseDown(visibleRow: visibleRow, columnIndex: columnIndex, event: event)
+    }
+}
+
+final class DataTextCellView: NSView {
+    var visibleRow = 0
+    var documentRow = 0
+    var columnIndex = 0
+    var rawValue = ""
+    var displayString = "" {
+        didSet { needsDisplay = true }
+    }
+    var textColor = NSColor.labelColor {
+        didSet { needsDisplay = true }
+    }
+    var alignment = NSTextAlignment.left {
+        didSet { needsDisplay = true }
+    }
+    var font = NSFont.systemFont(ofSize: 13) {
+        didSet { needsDisplay = true }
+    }
+    var selectionFill: NSColor? {
+        didSet { needsDisplay = true }
+    }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
+
+    var textRect: NSRect {
+        bounds.insetBy(dx: 8, dy: 0)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if let selectionFill {
+            selectionFill.setFill()
+            NSBezierPath(rect: bounds).fill()
+        }
+        drawDisplayString(color: textColor, clippedTo: nil)
+    }
+
+    func drawDisplayString(color: NSColor, clippedTo clipRect: NSRect?) {
+        guard !displayString.isEmpty else { return }
+        let attributes = textAttributes(color: color)
+        let string = displayString as NSString
+        let size = string.size(withAttributes: attributes)
+        let rect = textDrawRect(textWidth: size.width, textHeight: size.height)
+
+        NSGraphicsContext.saveGraphicsState()
+        if let clipRect {
+            NSBezierPath(rect: clipRect).addClip()
+        }
+        string.draw(in: rect, withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    func xPosition(forUTF16Index index: Int) -> CGFloat {
+        guard !displayString.isEmpty else { return textDrawOriginX(textWidth: 0) }
+        let boundedIndex = max(0, min(index, (displayString as NSString).length))
+        let prefix = (displayString as NSString).substring(to: boundedIndex) as NSString
+        let width = prefix.size(withAttributes: textAttributes(color: textColor)).width
+        let textWidth = (displayString as NSString).size(withAttributes: textAttributes(color: textColor)).width
+        return textDrawOriginX(textWidth: textWidth) + width
+    }
+
+    func insertionIndex(for point: NSPoint) -> Int {
+        let string = displayString as NSString
+        let length = string.length
+        guard length > 0 else { return 0 }
+
+        let attributes = textAttributes(color: textColor)
+        let textWidth = string.size(withAttributes: attributes).width
+        let originX = textDrawOriginX(textWidth: textWidth)
+        if point.x <= originX {
+            return 0
+        }
+        if point.x >= originX + textWidth {
+            return length
+        }
+
+        var low = 0
+        var high = length
+        while low < high {
+            let mid = (low + high) / 2
+            let prefixWidth = string.substring(to: mid) as NSString
+            if originX + prefixWidth.size(withAttributes: attributes).width < point.x {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+
+        let previous = max(0, low - 1)
+        let previousX = originX + (string.substring(to: previous) as NSString).size(withAttributes: attributes).width
+        let currentX = originX + (string.substring(to: low) as NSString).size(withAttributes: attributes).width
+        return abs(point.x - previousX) < abs(currentX - point.x) ? previous : low
+    }
+
+    func containsText(at point: NSPoint) -> Bool {
+        guard !displayString.isEmpty else { return false }
+        let string = displayString as NSString
+        let textSize = string.size(withAttributes: textAttributes(color: textColor))
+        let textBounds = NSRect(
+            x: textDrawOriginX(textWidth: textSize.width),
+            y: max(0, (bounds.height - textSize.height) / 2),
+            width: min(textSize.width, textRect.width),
+            height: textSize.height
+        ).insetBy(dx: -3, dy: -5)
+        return textBounds.contains(point)
+    }
+
+    private func textAttributes(color: NSColor) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        paragraph.lineBreakMode = .byTruncatingTail
+        return [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraph
+        ]
+    }
+
+    private func textDrawRect(textWidth: CGFloat, textHeight: CGFloat) -> NSRect {
+        NSRect(
+            x: textRect.minX,
+            y: max(0, (bounds.height - textHeight) / 2),
+            width: textRect.width,
+            height: textHeight
+        )
+    }
+
+    private func textDrawOriginX(textWidth: CGFloat) -> CGFloat {
+        switch alignment {
+        case .right:
+            return textWidth < textRect.width ? textRect.maxX - textWidth : textRect.minX
+        case .center:
+            return textRect.minX + max(0, (textRect.width - textWidth) / 2)
+        default:
+            return textRect.minX
+        }
+    }
 }
 
 final class DataCellButton: NSButton {
+    weak var mouseHandler: DataCellMouseHandling?
+    var visibleRow = 0
     var documentRow = 0
     var columnIndex = 0
     var rawValue = ""
+
+    override func mouseDown(with event: NSEvent) {
+        if mouseHandler?.dataCellControlShouldHandleMouseDown(visibleRow: visibleRow, columnIndex: columnIndex, event: event) == true {
+            super.mouseDown(with: event)
+        }
+    }
 }
 
 final class DataCellPopupButton: NSPopUpButton {
+    weak var mouseHandler: DataCellMouseHandling?
+    var visibleRow = 0
     var documentRow = 0
     var columnIndex = 0
+
+    override func mouseDown(with event: NSEvent) {
+        if mouseHandler?.dataCellControlShouldHandleMouseDown(visibleRow: visibleRow, columnIndex: columnIndex, event: event) == true {
+            super.mouseDown(with: event)
+        }
+    }
 }
 
 final class ColumnTypeMenuItem: NSMenuItem {
@@ -24,6 +203,368 @@ final class ColumnTypeMenuItem: NSMenuItem {
 
 final class ColumnMenuItem: NSMenuItem {
     var columnIndex = 0
+}
+
+private enum TableSelectionMode {
+    case cells
+    case rows
+    case columns
+    case all
+}
+
+private struct TableSelectionRange {
+    var mode = TableSelectionMode.cells
+    var rows = IndexSet()
+    var columns = IndexSet()
+
+    var isEmpty: Bool {
+        rows.isEmpty || columns.isEmpty
+    }
+}
+
+protocol DataTableSelectionHandling: AnyObject {
+    func selectCellRange(from start: (row: Int, column: Int), to end: (row: Int, column: Int))
+    func selectRowRange(from startRow: Int, to endRow: Int)
+    func selectColumnRange(from startColumn: Int, to endColumn: Int)
+    func beginTextSelection(in cell: DataTextCellView, anchorEvent: NSEvent, firstDragEvent: NSEvent)
+    func activateSelectedCellTextInteraction(initialText: String?, activationEvent: NSEvent?)
+    func editSelectedCell(initialText: String?)
+    func moveSelectedCell(rowDelta: Int, columnDelta: Int)
+    func endActiveCellTextInteraction(commit: Bool)
+    func canReorderRows() -> Bool
+    func showRowDropIndicator(atVisibleIndex index: Int)
+    func hideRowDropIndicator()
+    func moveSelectedRows(toVisibleIndex index: Int)
+}
+
+protocol InlineCellEditorHandling: AnyObject {
+    func inlineCellEditorDidCommit(_ editor: InlineCellEditor)
+    func inlineCellEditorDidCancel(_ editor: InlineCellEditor)
+}
+
+final class InlineCellEditor: NSTextView {
+    weak var editHandler: InlineCellEditorHandling?
+    var commitsChanges = false
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func cancelOperation(_ sender: Any?) {
+        editHandler?.inlineCellEditorDidCancel(self)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            if event.keyCode == 36 || event.keyCode == 76 {
+                editHandler?.inlineCellEditorDidCommit(self)
+                return
+            }
+            if event.keyCode == 53 {
+                editHandler?.inlineCellEditorDidCancel(self)
+                return
+            }
+        }
+        super.keyDown(with: event)
+    }
+}
+
+final class SelectionOverlayView: NSView {
+    weak var tableView: NSTableView?
+    fileprivate var selectionRange = TableSelectionRange() {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let tableView,
+              selectionRange.mode == .cells,
+              !selectionRange.isEmpty,
+              let firstRow = selectionRange.rows.min(),
+              let lastRow = selectionRange.rows.max(),
+              let firstColumn = selectionRange.columns.min(),
+              let lastColumn = selectionRange.columns.max(),
+              firstRow >= 0,
+              lastRow < tableView.numberOfRows,
+              firstColumn >= 0,
+              lastColumn < tableView.numberOfColumns else {
+            return
+        }
+
+        let rowRect = tableView.rect(ofRow: firstRow).union(tableView.rect(ofRow: lastRow))
+        let columnRect = tableView.rect(ofColumn: firstColumn).union(tableView.rect(ofColumn: lastColumn))
+        let tableRect = rowRect.intersection(columnRect)
+        guard !tableRect.isNull, !tableRect.isEmpty else { return }
+
+        let overlayRect = tableView.convert(tableRect, to: self).insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: overlayRect, xRadius: 2.5, yRadius: 2.5)
+        path.lineWidth = 2
+        NSColor.controlAccentColor.setStroke()
+        path.stroke()
+    }
+}
+
+final class CellTextSelectionOverlay: NSView {
+    private let cellView: DataTextCellView
+    private(set) var selectedRange = NSRange(location: 0, length: 0) {
+        didSet { needsDisplay = true }
+    }
+
+    var selectedText: String? {
+        guard selectedRange.length > 0,
+              let range = Range(selectedRange, in: cellView.displayString) else {
+            return nil
+        }
+        return String(cellView.displayString[range])
+    }
+
+    init(cellView: DataTextCellView, frame: NSRect) {
+        self.cellView = cellView
+        super.init(frame: frame)
+        wantsLayer = false
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard selectedRange.length > 0 else {
+            cellView.drawDisplayString(color: cellView.textColor, clippedTo: nil)
+            return
+        }
+
+        let lowerX = cellView.xPosition(forUTF16Index: selectedRange.location)
+        let upperX = cellView.xPosition(forUTF16Index: selectedRange.location + selectedRange.length)
+        let selectionRect = NSRect(
+            x: max(0, min(lowerX, upperX)),
+            y: max(2, (bounds.height - cellView.font.boundingRectForFont.height) / 2 - 2),
+            width: min(bounds.width, abs(upperX - lowerX)),
+            height: min(bounds.height - 4, cellView.font.boundingRectForFont.height + 4)
+        )
+
+        NSColor.selectedTextBackgroundColor.setFill()
+        NSBezierPath(roundedRect: selectionRect, xRadius: 3, yRadius: 3).fill()
+        cellView.drawDisplayString(color: cellView.textColor, clippedTo: nil)
+        cellView.drawDisplayString(color: .selectedTextColor, clippedTo: selectionRect)
+    }
+
+    func beginSelection(anchorEvent: NSEvent, firstDragEvent: NSEvent) {
+        guard let window else { return }
+        let anchor = insertionIndex(for: anchorEvent)
+        selectedRange = range(from: anchor, to: insertionIndex(for: firstDragEvent))
+
+        while true {
+            guard let nextEvent = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else {
+                break
+            }
+            selectedRange = range(from: anchor, to: insertionIndex(for: nextEvent))
+            if nextEvent.type == .leftMouseUp {
+                break
+            }
+        }
+    }
+
+    private func insertionIndex(for event: NSEvent) -> Int {
+        let point = convert(event.locationInWindow, from: nil)
+        return cellView.insertionIndex(for: point)
+    }
+
+    private func range(from anchor: Int, to current: Int) -> NSRange {
+        let lower = min(anchor, current)
+        let upper = max(anchor, current)
+        return NSRange(location: lower, length: upper - lower)
+    }
+}
+
+final class DataTableView: NSTableView {
+    weak var selectionHandler: DataTableSelectionHandling?
+    private var dragStartCell: (row: Int, column: Int)?
+    private var dragStartRow: Int?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        let column = self.column(at: point)
+        guard row >= 0, column >= 0 else {
+            selectionHandler?.endActiveCellTextInteraction(commit: true)
+            window?.makeFirstResponder(self)
+            super.mouseDown(with: event)
+            return
+        }
+
+        if tableColumns[column].identifier.rawValue == "rowNumber" {
+            selectionHandler?.selectRowRange(from: row, to: row)
+            if selectionHandler?.canReorderRows() == true {
+                trackRowReorderDrag(from: row, initialEvent: event)
+            } else {
+                dragStartRow = row
+                trackSelectionDrag(kind: .rows)
+            }
+        } else {
+            selectionHandler?.selectCellRange(from: (row, column), to: (row, column))
+            if event.clickCount >= 2 {
+                DispatchQueue.main.async { [weak self] in
+                    self?.selectionHandler?.activateSelectedCellTextInteraction(initialText: nil, activationEvent: event)
+                }
+                return
+            }
+            trackDataCellMouseDown(event, start: (row, column))
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let modifierMask = event.modifierFlags.intersection([.command, .control, .option])
+        if modifierMask.isEmpty,
+           event.keyCode == 36 || event.keyCode == 76 {
+            selectionHandler?.editSelectedCell(initialText: nil)
+            return
+        }
+
+        if modifierMask.isEmpty {
+            switch event.keyCode {
+            case 123: selectionHandler?.moveSelectedCell(rowDelta: 0, columnDelta: -1); return
+            case 124: selectionHandler?.moveSelectedCell(rowDelta: 0, columnDelta: 1); return
+            case 125: selectionHandler?.moveSelectedCell(rowDelta: 1, columnDelta: 0); return
+            case 126: selectionHandler?.moveSelectedCell(rowDelta: -1, columnDelta: 0); return
+            default: break
+            }
+        }
+
+        if modifierMask.isEmpty,
+           let text = event.charactersIgnoringModifiers,
+           text.count == 1,
+           text.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value != 127 }) {
+            selectionHandler?.editSelectedCell(initialText: text)
+            return
+        }
+
+        super.keyDown(with: event)
+    }
+
+    func trackCellSelectionDrag(from start: (row: Int, column: Int)) {
+        dragStartCell = start
+        trackSelectionDrag(kind: .cells)
+    }
+
+    private func trackRowReorderDrag(from startRow: Int, initialEvent: NSEvent) {
+        guard let window else { return }
+        let startPoint = initialEvent.locationInWindow
+        var dragging = false
+
+        while true {
+            guard let event = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else { break }
+            if event.type == .leftMouseUp {
+                if dragging {
+                    selectionHandler?.moveSelectedRows(toVisibleIndex: rowDropIndex(for: event))
+                }
+                break
+            }
+            let distance = hypot(event.locationInWindow.x - startPoint.x, event.locationInWindow.y - startPoint.y)
+            if !dragging, distance < 4 { continue }
+            dragging = true
+            selectionHandler?.showRowDropIndicator(atVisibleIndex: rowDropIndex(for: event))
+        }
+        selectionHandler?.hideRowDropIndicator()
+    }
+
+    private func rowDropIndex(for event: NSEvent) -> Int {
+        let point = convert(event.locationInWindow, from: nil)
+        let r = row(at: point)
+        guard r >= 0 else {
+            return point.y <= 0 ? 0 : numberOfRows
+        }
+        let rect = rect(ofRow: r)
+        return point.y < rect.midY ? r : r + 1
+    }
+
+    func trackRowSelectionDrag(from startRow: Int) {
+        dragStartRow = startRow
+        trackSelectionDrag(kind: .rows)
+    }
+
+    private func trackDataCellMouseDown(_ event: NSEvent, start: (row: Int, column: Int)) {
+        guard let window else { return }
+        let textCell = view(atColumn: start.column, row: start.row, makeIfNecessary: false) as? DataTextCellView
+        let startsOnText: Bool
+        if let textCell {
+            startsOnText = textCell.containsText(at: textCell.convert(event.locationInWindow, from: nil))
+        } else {
+            startsOnText = false
+        }
+        let startPoint = event.locationInWindow
+
+        while true {
+            guard let nextEvent = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else { return }
+            if nextEvent.type == .leftMouseUp {
+                return
+            }
+
+            let distance = hypot(nextEvent.locationInWindow.x - startPoint.x, nextEvent.locationInWindow.y - startPoint.y)
+            guard distance >= 3 else { continue }
+
+            if startsOnText, let textCell {
+                selectionHandler?.beginTextSelection(in: textCell, anchorEvent: event, firstDragEvent: nextEvent)
+                return
+            }
+
+            dragStartCell = start
+            handleSelectionDragEvent(kind: .cells, event: nextEvent)
+            trackSelectionDrag(kind: .cells)
+            return
+        }
+    }
+
+    private func trackSelectionDrag(kind: TableSelectionMode) {
+        guard let window else { return }
+        while true {
+            guard let event = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else { return }
+            if event.type == .leftMouseUp {
+                break
+            }
+            handleSelectionDragEvent(kind: kind, event: event)
+        }
+        dragStartCell = nil
+        dragStartRow = nil
+    }
+
+    private func handleSelectionDragEvent(kind: TableSelectionMode, event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        let column = self.column(at: point)
+
+        switch kind {
+        case .cells:
+            guard let dragStartCell,
+                  row >= 0,
+                  column >= 0,
+                  tableColumns.indices.contains(column),
+                  tableColumns[column].identifier.rawValue != "rowNumber" else { return }
+            selectionHandler?.selectCellRange(from: dragStartCell, to: (row, column))
+        case .rows:
+            guard let dragStartRow, row >= 0 else { return }
+            selectionHandler?.selectRowRange(from: dragStartRow, to: row)
+        case .columns, .all:
+            break
+        }
+    }
+
 }
 
 final class DropView: NSView {
@@ -44,8 +585,63 @@ final class DropView: NSView {
     }
 }
 
+final class CornerSelectButton: NSView {
+    var onClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+}
+
+final class SelectableHeaderCell: NSTableHeaderCell {
+    var isHighlightedColumn = false
+    // The real column rect (in column x-space). The last header cell gets stretched
+    // to fill trailing space, so we clip the highlight to the actual column rect to
+    // match the body tint and avoid bleeding past the column.
+    var highlightColumnRect: NSRect = .zero
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        guard isHighlightedColumn else {
+            super.draw(withFrame: cellFrame, in: controlView)
+            return
+        }
+        let frame: NSRect
+        if highlightColumnRect.width > 0 {
+            let clip = NSRect(x: highlightColumnRect.minX, y: cellFrame.minY,
+                              width: highlightColumnRect.width, height: cellFrame.height)
+            frame = cellFrame.intersection(clip)
+        } else {
+            frame = cellFrame
+        }
+        guard !frame.isEmpty else { return }
+
+        NSColor.controlAccentColor.setFill()
+        frame.fill()
+
+        let style = NSMutableParagraphStyle()
+        style.alignment = alignment
+        style.lineBreakMode = .byTruncatingTail
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: style
+        ]
+        let title = stringValue as NSString
+        let size = title.size(withAttributes: attrs)
+        let textRect = frame.insetBy(dx: 6, dy: 0)
+        let drawRect = NSRect(x: textRect.minX, y: frame.midY - size.height / 2, width: textRect.width, height: size.height)
+        title.draw(in: drawRect, withAttributes: attrs)
+    }
+}
+
 final class DataTableHeaderView: NSTableHeaderView {
     weak var columnActionHandler: MainWindowController?
+    weak var selectionHandler: DataTableSelectionHandling?
+    var highlightedColumns = IndexSet() {
+        didSet { needsDisplay = true }
+    }
+    var activeSortColumn: Int?
+    var activeSortAscending = true
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
@@ -53,19 +649,115 @@ final class DataTableHeaderView: NSTableHeaderView {
         columnActionHandler?.setContextColumnFromVisibleColumn(column)
         return columnActionHandler?.buildHeaderContextMenu(forVisibleColumn: column)
     }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let column = self.column(at: point)
+        guard column >= 0 else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        // The top-left "#" header is the row-number column: clicking it selects the whole table.
+        if tableView?.tableColumns[column].identifier.rawValue == "rowNumber" {
+            columnActionHandler?.selectAllCells()
+            return
+        }
+
+        if sortButtonRect(forColumn: column).contains(point) {
+            columnActionHandler?.toggleSort(forVisibleColumn: column)
+            return
+        }
+
+        columnActionHandler?.clearSortForHeaderSelection()
+        // Let NSTableHeaderView run its native click + column drag-reorder tracking
+        // first (it blocks until mouse-up). Doing our own selection / first-responder
+        // work before this previously cancelled the drag. Sync selection afterwards,
+        // using the column reference so we follow it to its new position if reordered.
+        let draggedColumn = tableView?.tableColumns[column]
+        super.mouseDown(with: event)
+        if let draggedColumn, let newIndex = tableView?.tableColumns.firstIndex(of: draggedColumn) {
+            selectionHandler?.selectColumnRange(from: newIndex, to: newIndex)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if let tableView {
+            for column in 0..<tableView.numberOfColumns {
+                guard let cell = tableView.tableColumns[column].headerCell as? SelectableHeaderCell else { continue }
+                cell.isHighlightedColumn = highlightedColumns.contains(column)
+                cell.highlightColumnRect = tableView.rect(ofColumn: column)
+            }
+        }
+        super.draw(dirtyRect)
+
+        drawSortButtons()
+    }
+
+    private func sortButtonRect(forColumn column: Int) -> NSRect {
+        let headerRect = headerRect(ofColumn: column)
+        return NSRect(
+            x: headerRect.maxX - 24,
+            y: headerRect.minY,
+            width: 22,
+            height: headerRect.height
+        ).insetBy(dx: 2, dy: 4)
+    }
+
+    private func drawSortButtons() {
+        guard let tableView else { return }
+        for column in 0..<tableView.numberOfColumns {
+            guard tableView.tableColumns[column].identifier.rawValue != "rowNumber" else { continue }
+            let buttonRect = sortButtonRect(forColumn: column)
+            let isActive = activeSortColumn == column
+            let onHighlighted = highlightedColumns.contains(column)
+            let color = onHighlighted ? NSColor.white
+                : (isActive ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor)
+            color.setFill()
+
+            let centerX = buttonRect.midX
+            let centerY = buttonRect.midY
+            let path = NSBezierPath()
+            if isActive && !activeSortAscending {
+                path.move(to: NSPoint(x: centerX - 4, y: centerY - 2))
+                path.line(to: NSPoint(x: centerX + 4, y: centerY - 2))
+                path.line(to: NSPoint(x: centerX, y: centerY + 3))
+            } else {
+                path.move(to: NSPoint(x: centerX - 4, y: centerY + 2))
+                path.line(to: NSPoint(x: centerX + 4, y: centerY + 2))
+                path.line(to: NSPoint(x: centerX, y: centerY - 3))
+            }
+            path.close()
+            path.fill()
+        }
+    }
 }
 
-final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSWindowDelegate, NSToolbarDelegate, NSDraggingDestination, NSMenuDelegate {
+final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSWindowDelegate, NSToolbarDelegate, NSDraggingDestination, NSMenuDelegate, DataTableSelectionHandling, DataCellMouseHandling, InlineCellEditorHandling {
+    var onClose: ((MainWindowController) -> Void)?
+    var hasLoadedDocument: Bool {
+        tableDocument != nil
+    }
+
     private var tableDocument: TableDocument?
     private var visibleRows: [Int] = []
     private var activeFilter: TableFilter?
     private var metadata = ViewMetadata()
     private var schema = TableSchema()
     private var editLocked = true
+    private var documentColumnOrderDirty = false
 
     private let rootView = DropView()
-    private let tableView = NSTableView()
+    private let tableView = DataTableView()
     private let scrollView = NSScrollView()
+    private let selectionOverlayView = SelectionOverlayView()
+    private lazy var rowDropIndicator: NSView = {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        view.isHidden = true
+        return view
+    }()
     private let searchField = NSSearchField()
     private let statusLabel = NSTextField(labelWithString: "")
     private let statusBadge = NSVisualEffectView()
@@ -83,6 +775,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var filterPanelVisible = false
     private var filterBar: NSView?
     private var contextColumnIndex: Int?
+    private var selectionMode = TableSelectionMode.cells
+    private var selectionRange = TableSelectionRange()
+    private var activeTextSelectionView: CellTextSelectionOverlay?
+    private weak var activeTextSelectionSource: DataTextCellView?
+    private var activeCellEditor: InlineCellEditor?
+    private weak var activeCellEditorSource: DataTextCellView?
     private var didBuildInterface = false
     private var appearanceObservation: NSKeyValueObservation?
 
@@ -95,6 +793,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         )
         window.title = "LightData"
         window.minSize = NSSize(width: 860, height: 520)
+        window.tabbingMode = .preferred
+        window.tabbingIdentifier = "LightDataDocumentWindow"
         self.init(window: window)
         configureWindow()
         window.center()
@@ -107,10 +807,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func open(url: URL) {
         do {
+            removeActiveTextSelectionView()
+            removeActiveCellEditor(commit: true)
             saveCurrentMetadata()
             let loaded = try TableDocument.load(url: url)
             tableDocument = loaded
             editLocked = true
+            documentColumnOrderDirty = false
             metadata = ViewMetadataStore.load(for: url)
             schema = metadata.schemaEnabled ? SchemaMetadataStore.load(for: url, headers: loaded.headers, rows: loaded.rows) : TableSchema()
             activeFilter = nil
@@ -122,7 +825,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             rebuildVisibleRows()
             updateStatus()
             updateToolbarState()
-            window?.title = "LightData - \(url.lastPathComponent)"
+            window?.title = url.lastPathComponent
+            window?.representedURL = url
         } catch {
             showError(error)
         }
@@ -131,8 +835,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     func saveDocument() {
         guard var current = tableDocument else { return }
         do {
+            if documentColumnOrderDirty,
+               let order = currentVisibleDataColumnOrder(in: current),
+               order != Array(current.headers.indices) {
+                current.reorderColumns(to: order)
+            }
             try current.save()
             tableDocument = current
+            documentColumnOrderDirty = false
+            metadata.columnOrder = current.headers
+            buildColumns()
+            refreshFilterControls()
             saveCurrentMetadata()
             saveCurrentSchema()
             updateStatus()
@@ -152,13 +865,24 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
               visibleRows.indices.contains(row) else {
             return nil
         }
+        let visibleColumn = tableView.tableColumns.firstIndex { $0 === tableColumn } ?? -1
 
         if tableColumn.identifier.rawValue == "rowNumber" {
             let id = NSUserInterfaceItemIdentifier("RowNumberCell")
             let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeCellView(identifier: id)
             cell.textField?.stringValue = String(visibleRows[row] + 1)
             cell.textField?.isEditable = false
+            cell.textField?.isSelectable = false
+            cell.textField?.alignment = .center
             cell.textField?.textColor = .secondaryLabelColor
+            if let textField = cell.textField as? DataCellTextField {
+                textField.mouseHandler = self
+                textField.visibleRow = row
+                textField.columnIndex = -1
+                textField.documentRow = visibleRows[row]
+                textField.rawValue = cell.textField?.stringValue ?? ""
+            }
+            applySelectionStyle(to: cell, visibleRow: row, visibleColumn: visibleColumn)
             return cell
         }
 
@@ -172,23 +896,23 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         switch columnSchema.type {
         case .checkbox:
-            return checkboxCell(value: value, schema: columnSchema, documentRow: documentRow, columnIndex: columnIndex)
+            return checkboxCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
         case .select, .status:
-            return popupCell(value: value, schema: columnSchema, documentRow: documentRow, columnIndex: columnIndex)
+            return popupCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
         case .multiSelect:
-            return multiSelectCell(value: value, schema: columnSchema, documentRow: documentRow, columnIndex: columnIndex)
+            return multiSelectCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
         case .url:
-            return urlCell(value: value, documentRow: documentRow, columnIndex: columnIndex)
+            return urlCell(value: value, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
         default:
             let id = NSUserInterfaceItemIdentifier("DataCell")
-            let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeCellView(identifier: id)
-            if let textField = cell.textField as? DataCellTextField {
-                configure(textField: textField, value: value, schema: columnSchema)
-                textField.isEditable = isEditingEnabled
-                textField.documentRow = documentRow
-                textField.columnIndex = columnIndex
-                textField.rawValue = value
-            }
+            let cell = tableView.makeView(withIdentifier: id, owner: self) as? DataTextCellView ?? makeDataTextCell(identifier: id)
+            configure(textCell: cell, value: value, schema: columnSchema)
+            cell.visibleRow = row
+            cell.documentRow = documentRow
+            cell.columnIndex = columnIndex
+            cell.rawValue = value
+            cell.selectionFill = isBodyCell(visibleRow: row, visibleColumn: visibleColumn)
+                ? NSColor.controlAccentColor.withAlphaComponent(0.10) : nil
             return cell
         }
     }
@@ -198,20 +922,248 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func tableViewColumnDidResize(_ notification: Notification) {
+        updateActiveCellEditorFrame()
         captureMetadata()
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) {
+    func tableViewColumnDidMove(_ notification: Notification) {
+        removeActiveCellEditor(commit: true)
+        captureMetadata()
+        if isEditingEnabled,
+           let current = tableDocument,
+           let order = currentVisibleDataColumnOrder(in: current),
+           order != Array(current.headers.indices) {
+            documentColumnOrderDirty = true
+            tableDocument?.dirty = true
+        }
+        refreshVisibleSelectionAppearance()
+        updateHeaderSortState()
+        updateStatus()
         updateToolbarState()
     }
 
-    func controlTextDidEndEditing(_ obj: Notification) {
-        guard let textField = obj.object as? DataCellTextField else { return }
-        let newValue = rawValueForEditedText(textField.stringValue, textField: textField)
-        if newValue != textField.rawValue {
-            tableDocument?.setValue(newValue, row: textField.documentRow, column: textField.columnIndex)
+    func tableView(_ tableView: NSTableView, shouldReorderColumn columnIndex: Int, toColumn newColumnIndex: Int) -> Bool {
+        // newColumnIndex == -1 is AppKit's initial "can this column be dragged at all"
+        // query — must allow it or the drag never starts. Only forbid dropping at 0
+        // (the row-number column's slot).
+        isEditingEnabled && isDataVisibleColumn(columnIndex) && newColumnIndex != 0
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        refreshVisibleSelectionAppearance()
+        updateToolbarState()
+    }
+
+    func dataCellControlShouldHandleMouseDown(visibleRow: Int, columnIndex: Int, event: NSEvent) -> Bool {
+        removeActiveTextSelectionView()
+        if columnIndex < 0 {
+            selectRowRange(from: visibleRow, to: visibleRow)
+            return false
+        }
+
+        guard let visibleColumn = visibleColumn(forDataColumn: columnIndex),
+              visibleRows.indices.contains(visibleRow) else {
+            return false
+        }
+        let alreadySelectedCell = singleSelectedCell.map { $0 == (visibleRow, visibleColumn) } ?? false
+
+        if alreadySelectedCell {
+            return true
+        }
+
+        selectCellRange(from: (visibleRow, visibleColumn), to: (visibleRow, visibleColumn))
+        return false
+    }
+
+    func selectCellRange(from start: (row: Int, column: Int), to end: (row: Int, column: Int)) {
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
+        guard visibleRows.indices.contains(start.row),
+              visibleRows.indices.contains(end.row),
+              isDataVisibleColumn(start.column),
+              isDataVisibleColumn(end.column) else {
+            return
+        }
+        selectionMode = .cells
+        selectionRange = TableSelectionRange(mode: .cells, rows: indexSet(from: start.row, to: end.row), columns: indexSet(from: start.column, to: end.column))
+        tableView.selectRowIndexes(selectionRange.rows, byExtendingSelection: false)
+        window?.makeFirstResponder(tableView)
+        refreshVisibleSelectionAppearance()
+        updateToolbarState()
+    }
+
+    func selectRowRange(from startRow: Int, to endRow: Int) {
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
+        guard visibleRows.indices.contains(startRow),
+              visibleRows.indices.contains(endRow) else {
+            return
+        }
+        selectionMode = .rows
+        selectionRange = TableSelectionRange(mode: .rows, rows: indexSet(from: startRow, to: endRow), columns: dataVisibleColumnIndexes())
+        tableView.selectRowIndexes(selectionRange.rows, byExtendingSelection: false)
+        window?.makeFirstResponder(tableView)
+        refreshVisibleSelectionAppearance()
+        updateToolbarState()
+    }
+
+    func selectColumnRange(from startColumn: Int, to endColumn: Int) {
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
+        guard isDataVisibleColumn(startColumn),
+              isDataVisibleColumn(endColumn) else {
+            return
+        }
+        selectionMode = .columns
+        let selectedRows = visibleRows.isEmpty ? IndexSet() : IndexSet(integersIn: 0..<visibleRows.count)
+        selectionRange = TableSelectionRange(mode: .columns, rows: selectedRows, columns: indexSet(from: startColumn, to: endColumn))
+        if visibleRows.isEmpty {
+            tableView.selectRowIndexes(IndexSet(), byExtendingSelection: false)
+        } else {
+            tableView.selectRowIndexes(selectedRows, byExtendingSelection: false)
+        }
+        setContextColumnFromVisibleColumn(startColumn)
+        window?.makeFirstResponder(tableView)
+        refreshVisibleSelectionAppearance()
+        updateToolbarState()
+    }
+
+    func selectAllCells() {
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
+        guard !visibleRows.isEmpty else { return }
+        let dataColumns = dataVisibleColumnIndexes()
+        guard !dataColumns.isEmpty else { return }
+        selectionMode = .all
+        selectionRange = TableSelectionRange(
+            mode: .all,
+            rows: IndexSet(integersIn: 0..<visibleRows.count),
+            columns: dataColumns
+        )
+        tableView.selectRowIndexes(selectionRange.rows, byExtendingSelection: false)
+        window?.makeFirstResponder(tableView)
+        refreshVisibleSelectionAppearance()
+        updateToolbarState()
+    }
+
+    // Row reorder is only meaningful when the visible order matches the document
+    // order (no sort / filter / search), otherwise dragging rows is ambiguous.
+    func canReorderRows() -> Bool {
+        guard isEditingEnabled, let document = tableDocument else { return false }
+        return visibleRows == Array(0..<document.rowCount)
+    }
+
+    func showRowDropIndicator(atVisibleIndex index: Int) {
+        if rowDropIndicator.superview !== tableView {
+            tableView.addSubview(rowDropIndicator)
+        }
+        let rowCount = tableView.numberOfRows
+        let y: CGFloat
+        if index >= rowCount {
+            y = rowCount > 0 ? tableView.rect(ofRow: rowCount - 1).maxY : 0
+        } else {
+            y = tableView.rect(ofRow: index).minY
+        }
+        rowDropIndicator.frame = NSRect(x: 0, y: y - 1, width: tableView.bounds.width, height: 2)
+        rowDropIndicator.isHidden = false
+        tableView.addSubview(rowDropIndicator, positioned: .above, relativeTo: nil)
+    }
+
+    func hideRowDropIndicator() {
+        rowDropIndicator.isHidden = true
+    }
+
+    func moveSelectedRows(toVisibleIndex index: Int) {
+        guard canReorderRows() else { return }
+        let sorted = selectionRange.rows.sorted()
+        guard !sorted.isEmpty else { return }
+        let removedBefore = sorted.filter { $0 < index }.count
+        let insertAt = index - removedBefore
+        tableDocument?.moveRows(IndexSet(sorted), to: index)
+        rebuildVisibleRows()
+        let count = sorted.count
+        let newStart = min(max(insertAt, 0), max(0, visibleRows.count - count))
+        if visibleRows.indices.contains(newStart) {
+            selectRowRange(from: newStart, to: min(newStart + count - 1, visibleRows.count - 1))
         }
         updateStatus()
+        updateToolbarState()
+    }
+
+    func beginTextSelection(in cell: DataTextCellView, anchorEvent: NSEvent, firstDragEvent: NSEvent) {
+        showTextSelectionOverlay(for: cell, anchorEvent: anchorEvent, firstDragEvent: firstDragEvent)
+    }
+
+    @objc func editSelectedCellClicked(_ sender: Any?) {
+        editSelectedCell(initialText: nil)
+    }
+
+    func activateSelectedCellTextInteraction(initialText: String?, activationEvent: NSEvent?) {
+        guard isEditingEnabled,
+              let (visibleRow, visibleColumn) = singleSelectedCell,
+              let cell = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? DataTextCellView else {
+            return
+        }
+
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
+        showInlineCellEditor(for: cell, initialText: initialText, activationEvent: activationEvent)
+    }
+
+    func moveSelectedCell(rowDelta: Int, columnDelta: Int) {
+        endActiveCellTextInteraction(commit: true)
+        guard !visibleRows.isEmpty else { return }
+        let dataColumns = (0..<tableView.numberOfColumns).filter { isDataVisibleColumn($0) }
+        guard let firstDataColumn = dataColumns.first else { return }
+
+        let current = singleSelectedCell
+        let currentRow = current?.visibleRow ?? 0
+        let currentColumn = current?.visibleColumn ?? firstDataColumn
+
+        let newRow = min(max(currentRow + rowDelta, 0), visibleRows.count - 1)
+        var newColumn = currentColumn
+        if columnDelta != 0 {
+            if let index = dataColumns.firstIndex(of: currentColumn) {
+                let newIndex = min(max(index + columnDelta, 0), dataColumns.count - 1)
+                newColumn = dataColumns[newIndex]
+            } else {
+                newColumn = firstDataColumn
+            }
+        }
+
+        selectCellRange(from: (newRow, newColumn), to: (newRow, newColumn))
+        tableView.scrollRowToVisible(newRow)
+        tableView.scrollColumnToVisible(newColumn)
+    }
+
+    func editSelectedCell(initialText: String?) {
+        guard isEditingEnabled, singleSelectedCell != nil else {
+            return
+        }
+
+        activateSelectedCellTextInteraction(initialText: initialText, activationEvent: nil)
+    }
+
+    func endActiveCellTextInteraction(commit: Bool) {
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: commit)
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {}
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if let editor = textView as? InlineCellEditor,
+           editor === activeCellEditor {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                commitActiveCellEditor(value: editor.string)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                cancelActiveCellEditor()
+                return true
+            }
+        }
+        return false
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -220,20 +1172,38 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
+    func textDidEndEditing(_ notification: Notification) {
+        guard notification.object as? InlineCellEditor === activeCellEditor else { return }
+        commitActiveCellEditor()
+    }
+
+    func inlineCellEditorDidCommit(_ editor: InlineCellEditor) {
+        guard editor === activeCellEditor else { return }
+        commitActiveCellEditor(value: editor.string)
+    }
+
+    func inlineCellEditorDidCancel(_ editor: InlineCellEditor) {
+        guard editor === activeCellEditor else { return }
+        cancelActiveCellEditor()
+    }
+
     func windowWillClose(_ notification: Notification) {
         saveCurrentMetadata()
+        onClose?(self)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(copy(_:)):
-            return !tableView.selectedRowIndexes.isEmpty
+            return hasCopyableSelection
         case #selector(paste(_:)):
             return isEditingEnabled
+        case #selector(editSelectedCellClicked(_:)):
+            return canEditSelectedCell
         case #selector(addRowClicked(_:)):
             return isEditingEnabled
         case #selector(deleteRowsClicked(_:)):
-            return isEditingEnabled && !tableView.selectedRowIndexes.isEmpty
+            return isEditingEnabled && selectionMode == .rows && !tableView.selectedRowIndexes.isEmpty
         case #selector(renameColumnClicked(_:)), #selector(deleteColumnClicked(_:)):
             return isEditingEnabled && activeColumnIndex() != nil
         case #selector(setColumnTypeFromMenu(_:)):
@@ -253,15 +1223,24 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
+        [.newTab, .openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
+        [.newTab, .openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
+        case .newTab:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "New Tab"
+            item.paletteLabel = "New Tab"
+            item.toolTip = "Open a new tab"
+            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")
+            item.target = self
+            item.action = #selector(newWindowForTab(_:))
+            return item
         case .openFile:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Open"
@@ -279,6 +1258,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             item.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Save")
             item.target = self
             item.action = #selector(saveClicked(_:))
+            item.autovalidates = false
             return item
         case .fileInfo:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -297,6 +1277,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             item.image = NSImage(systemSymbolName: "lock", accessibilityDescription: "Edit")
             item.target = self
             item.action = #selector(toggleEditModeClicked(_:))
+            item.autovalidates = false
             editModeItem = item
             return item
         case .toggleTypes:
@@ -307,6 +1288,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             item.image = NSImage(systemSymbolName: "tag", accessibilityDescription: "Types")
             item.target = self
             item.action = #selector(toggleTypesClicked(_:))
+            item.autovalidates = false
             typeModeItem = item
             return item
         case .filterPanel:
@@ -317,6 +1299,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             item.image = NSImage(systemSymbolName: "line.3.horizontal.decrease.circle", accessibilityDescription: "Filter")
             item.target = self
             item.action = #selector(toggleFilterPanelClicked(_:))
+            item.autovalidates = false
             filterItem = item
             return item
         case .addRow:
@@ -327,6 +1310,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Row")
             item.target = self
             item.action = #selector(addRowClicked(_:))
+            item.autovalidates = false
             addRowItem = item
             return item
         case .deleteRow:
@@ -337,6 +1321,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete")
             item.target = self
             item.action = #selector(deleteRowsClicked(_:))
+            item.autovalidates = false
             deleteRowItem = item
             return item
         case .searchField:
@@ -362,7 +1347,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         guard let url = firstSupportedFileURL(from: sender.draggingPasteboard) else { return false }
-        open(url: url)
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.openFileInTab(url: url)
+        } else {
+            open(url: url)
+        }
         return true
     }
 
@@ -390,15 +1379,48 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         contextColumnIndex = Int(tableView.tableColumns[visibleColumn].identifier.rawValue)
     }
 
+    func toggleSort(forVisibleColumn visibleColumn: Int) {
+        guard isDataVisibleColumn(visibleColumn),
+              let columnIndex = Int(tableView.tableColumns[visibleColumn].identifier.rawValue) else {
+            return
+        }
+
+        let current = tableView.sortDescriptors.first
+        let ascending: Bool
+        if current?.key == String(columnIndex) {
+            ascending = !(current?.ascending ?? true)
+        } else {
+            ascending = true
+        }
+
+        tableView.sortDescriptors = [
+            NSSortDescriptor(key: String(columnIndex), ascending: ascending)
+        ]
+        updateHeaderSortState()
+    }
+
+    func clearSortForHeaderSelection() {
+        guard !tableView.sortDescriptors.isEmpty else {
+            updateHeaderSortState()
+            return
+        }
+        tableView.sortDescriptors = []
+        updateHeaderSortState()
+    }
+
     @objc private func openClicked(_ sender: Any?) {
         NSApp.sendAction(#selector(AppDelegate.openDocument(_:)), to: NSApp.delegate, from: sender)
+    }
+
+    override func newWindowForTab(_ sender: Any?) {
+        NSApp.sendAction(#selector(AppDelegate.newWindowForTab(_:)), to: NSApp.delegate, from: sender)
     }
 
     @objc private func saveClicked(_ sender: Any?) {
         saveDocument()
     }
 
-    @objc private func showFileInfoClicked(_ sender: Any?) {
+    @objc func showFileInfoClicked(_ sender: Any?) {
         guard let tableDocument else { return }
         let info = tableDocument.openInfo
         let alert = NSAlert()
@@ -419,19 +1441,21 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         alert.runModal()
     }
 
-    @objc private func toggleEditModeClicked(_ sender: Any?) {
+    @objc func toggleEditModeClicked(_ sender: Any?) {
         guard let tableDocument else { return }
         guard tableDocument.canEditFormat else {
             showError(TableDocumentError.saveUnsupported(tableDocument.openInfo.readOnlyReason ?? "\(tableDocument.format.displayName) is read-only."))
             return
         }
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
         editLocked.toggle()
         tableView.reloadData()
         updateStatus()
         updateToolbarState()
     }
 
-    @objc private func toggleTypesClicked(_ sender: Any?) {
+    @objc func toggleTypesClicked(_ sender: Any?) {
         guard let tableDocument else { return }
         metadata.schemaEnabled.toggle()
         if metadata.schemaEnabled {
@@ -447,13 +1471,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateToolbarState()
     }
 
-    @objc private func toggleFilterPanelClicked(_ sender: Any?) {
+    @objc func toggleFilterPanelClicked(_ sender: Any?) {
         filterPanelVisible.toggle()
         filterBar?.isHidden = !filterPanelVisible
         updateToolbarState()
     }
 
-    @objc private func addRowClicked(_ sender: Any?) {
+    @objc func addRowClicked(_ sender: Any?) {
         guard isEditingEnabled else { return }
         let selectedDocumentRows = selectedDocumentRowIndexes()
         let insertionRow = selectedDocumentRows.max()
@@ -463,8 +1487,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateToolbarState()
     }
 
-    @objc private func deleteRowsClicked(_ sender: Any?) {
-        guard isEditingEnabled else { return }
+    @objc func deleteRowsClicked(_ sender: Any?) {
+        guard isEditingEnabled, selectionMode == .rows else { return }
         let selectedRows = selectedDocumentRowIndexes()
         guard !selectedRows.isEmpty else { return }
         tableDocument?.deleteRows(selectedRows)
@@ -473,7 +1497,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateToolbarState()
     }
 
-    @objc private func renameColumnClicked(_ sender: Any?) {
+    @objc func renameColumnClicked(_ sender: Any?) {
         guard isEditingEnabled,
               let columnIndex = columnIndex(from: sender),
               let tableDocument else {
@@ -505,7 +1529,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
-    @objc private func deleteColumnClicked(_ sender: Any?) {
+    @objc func deleteColumnClicked(_ sender: Any?) {
         guard isEditingEnabled,
               let columnIndex = columnIndex(from: sender) else {
             return
@@ -522,6 +1546,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     @objc func copy(_ sender: Any?) {
+        if let selectedText = activeSelectedText(), !selectedText.isEmpty {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(selectedText, forType: .string)
+            return
+        }
+
         let text = selectedTabDelimitedText()
         guard !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -674,10 +1704,21 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         rebuildVisibleRows()
     }
 
-    @objc private func clearFilterClicked(_ sender: Any?) {
+    @objc func clearFilterClicked(_ sender: Any?) {
         activeFilter = nil
         filterValueField.stringValue = ""
         rebuildVisibleRows()
+    }
+
+    @objc func clearSortClicked(_ sender: Any?) {
+        tableView.sortDescriptors = []
+        rebuildVisibleRows()
+        updateHeaderSortState()
+    }
+
+    @objc func reloadFileClicked(_ sender: Any?) {
+        guard let url = tableDocument?.url else { return }
+        open(url: url)
     }
 
     @objc private func delimiterChanged(_ sender: Any?) {
@@ -695,6 +1736,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             saveCurrentMetadata()
             let loaded = try TableDocument.load(url: tableDocument.url, delimiterOverride: delimiter)
             self.tableDocument = loaded
+            documentColumnOrderDirty = false
             metadata = ViewMetadataStore.load(for: loaded.url)
             schema = metadata.schemaEnabled ? SchemaMetadataStore.load(for: loaded.url, headers: loaded.headers, rows: loaded.rows) : TableSchema()
             activeFilter = nil
@@ -723,22 +1765,33 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
+        scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .textBackgroundColor
 
         tableView.usesAlternatingRowBackgroundColors = true
+        tableView.selectionHighlightStyle = .none
         tableView.allowsColumnReordering = true
+        tableView.allowsColumnSelection = false
+        tableView.allowsEmptySelection = true
         tableView.allowsColumnResizing = true
         tableView.allowsMultipleSelection = true
+        tableView.selectionHandler = self
+        tableView.style = .plain
         tableView.gridStyleMask = [.solidHorizontalGridLineMask, .solidVerticalGridLineMask]
+        tableView.intercellSpacing = NSSize(width: 0, height: 0)
         tableView.rowHeight = 28
         let headerView = DataTableHeaderView()
         headerView.columnActionHandler = self
+        headerView.selectionHandler = self
         tableView.headerView = headerView
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.cornerView = NSView()
+        let corner = CornerSelectButton()
+        corner.onClick = { [weak self] in self?.selectAllCells() }
+        tableView.cornerView = corner
         tableView.menu = buildTableContextMenu()
+        configureSelectionOverlay()
 
         configureStatusBadge()
 
@@ -786,6 +1839,26 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         window?.toolbar = toolbar
         window?.toolbarStyle = .unified
         window?.titleVisibility = .visible
+    }
+
+    private func configureSelectionOverlay() {
+        selectionOverlayView.tableView = tableView
+        selectionOverlayView.autoresizingMask = [.width, .height]
+        selectionOverlayView.frame = scrollView.contentView.bounds
+        selectionOverlayView.isHidden = true
+        scrollView.contentView.addSubview(selectionOverlayView, positioned: .above, relativeTo: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(scrollViewBoundsChanged(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
+    }
+
+    @objc private func scrollViewBoundsChanged(_ notification: Notification) {
+        selectionOverlayView.frame = scrollView.contentView.bounds
+        selectionOverlayView.needsDisplay = true
+        updateActiveCellEditorFrame()
     }
 
     private func configureStatusBadge() {
@@ -849,12 +1922,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func makeCellView(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.identifier = identifier
+        cell.focusRingType = .none
 
         let textField = DataCellTextField()
         textField.isBordered = false
         textField.drawsBackground = false
         textField.lineBreakMode = .byTruncatingTail
         textField.font = .systemFont(ofSize: 13)
+        textField.isEditable = false
+        textField.isSelectable = true
+        textField.focusRingType = .none
         textField.delegate = self
         textField.translatesAutoresizingMaskIntoConstraints = false
 
@@ -868,7 +1945,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return cell
     }
 
-    private func checkboxCell(value: String, schema: ColumnSchema, documentRow: Int, columnIndex: Int) -> NSView {
+    private func makeDataTextCell(identifier: NSUserInterfaceItemIdentifier) -> DataTextCellView {
+        let cell = DataTextCellView()
+        cell.identifier = identifier
+        cell.translatesAutoresizingMaskIntoConstraints = true
+        return cell
+    }
+
+    private func checkboxCell(value: String, schema: ColumnSchema, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
         let id = NSUserInterfaceItemIdentifier("CheckboxCell")
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeButtonCell(identifier: id)
         guard let button = cell.subviews.first as? DataCellButton else { return cell }
@@ -879,13 +1963,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         button.isEnabled = isEditingEnabled
         button.target = self
         button.action = #selector(checkboxClicked(_:))
+        button.mouseHandler = self
+        button.visibleRow = visibleRow
         button.documentRow = documentRow
         button.columnIndex = columnIndex
         button.rawValue = value
+        applySelectionStyle(to: cell, visibleRow: visibleRow, visibleColumn: visibleColumn(forDataColumn: columnIndex) ?? -1)
         return cell
     }
 
-    private func popupCell(value: String, schema: ColumnSchema, documentRow: Int, columnIndex: Int) -> NSView {
+    private func popupCell(value: String, schema: ColumnSchema, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
         let id = NSUserInterfaceItemIdentifier("PopupCell")
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makePopupCell(identifier: id)
         guard let popup = cell.subviews.first as? DataCellPopupButton else { return cell }
@@ -899,12 +1986,15 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         popup.isEnabled = isEditingEnabled
         popup.target = self
         popup.action = #selector(popupChanged(_:))
+        popup.mouseHandler = self
+        popup.visibleRow = visibleRow
         popup.documentRow = documentRow
         popup.columnIndex = columnIndex
+        applySelectionStyle(to: cell, visibleRow: visibleRow, visibleColumn: visibleColumn(forDataColumn: columnIndex) ?? -1)
         return cell
     }
 
-    private func multiSelectCell(value: String, schema: ColumnSchema, documentRow: Int, columnIndex: Int) -> NSView {
+    private func multiSelectCell(value: String, schema: ColumnSchema, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
         let id = NSUserInterfaceItemIdentifier("MultiSelectCell")
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeButtonCell(identifier: id)
         guard let button = cell.subviews.first as? DataCellButton else { return cell }
@@ -915,13 +2005,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         button.isEnabled = isEditingEnabled
         button.target = self
         button.action = #selector(multiSelectClicked(_:))
+        button.mouseHandler = self
+        button.visibleRow = visibleRow
         button.documentRow = documentRow
         button.columnIndex = columnIndex
         button.rawValue = value
+        applySelectionStyle(to: cell, visibleRow: visibleRow, visibleColumn: visibleColumn(forDataColumn: columnIndex) ?? -1)
         return cell
     }
 
-    private func urlCell(value: String, documentRow: Int, columnIndex: Int) -> NSView {
+    private func urlCell(value: String, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
         let id = NSUserInterfaceItemIdentifier("URLCell")
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeButtonCell(identifier: id)
         guard let button = cell.subviews.first as? DataCellButton else { return cell }
@@ -933,9 +2026,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         button.isEnabled = !value.isEmpty
         button.target = self
         button.action = #selector(urlClicked(_:))
+        button.mouseHandler = self
+        button.visibleRow = visibleRow
         button.documentRow = documentRow
         button.columnIndex = columnIndex
         button.rawValue = value
+        applySelectionStyle(to: cell, visibleRow: visibleRow, visibleColumn: visibleColumn(forDataColumn: columnIndex) ?? -1)
         return cell
     }
 
@@ -965,6 +2061,43 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             popup.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
         return cell
+    }
+
+    private func applySelectionStyle(to cell: NSTableCellView, visibleRow: Int, visibleColumn: Int) {
+        cell.wantsLayer = true
+        cell.layer?.cornerRadius = 0
+        if visibleColumn == 0 {
+            let anchor = isAnchorCell(visibleRow: visibleRow, visibleColumn: visibleColumn)
+            cell.layer?.backgroundColor = anchor ? NSColor.controlAccentColor.cgColor : NSColor.clear.cgColor
+            cell.textField?.textColor = anchor ? .white : .secondaryLabelColor
+            cell.textField?.font = .systemFont(ofSize: 13, weight: anchor ? .semibold : .regular)
+        } else {
+            let body = isBodyCell(visibleRow: visibleRow, visibleColumn: visibleColumn)
+            cell.layer?.backgroundColor = body
+                ? NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
+                : NSColor.clear.cgColor
+        }
+    }
+
+    // Row-number cell (column 0) is the "anchor" for row/all selection.
+    private func isAnchorCell(visibleRow: Int, visibleColumn: Int) -> Bool {
+        guard !selectionRange.isEmpty, visibleColumn == 0 else { return false }
+        switch selectionMode {
+        case .all: return true
+        case .rows: return selectionRange.rows.contains(visibleRow)
+        default: return false
+        }
+    }
+
+    // Data cells (column > 0) get the light body tint for row/column/all selection.
+    private func isBodyCell(visibleRow: Int, visibleColumn: Int) -> Bool {
+        guard !selectionRange.isEmpty, isDataVisibleColumn(visibleColumn) else { return false }
+        switch selectionMode {
+        case .all: return true
+        case .rows: return selectionRange.rows.contains(visibleRow)
+        case .columns: return selectionRange.columns.contains(visibleColumn)
+        case .cells: return false
+        }
     }
 
     private func buildTableContextMenu() -> NSMenu {
@@ -1029,18 +2162,43 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         rowNumberColumn.width = 56
         rowNumberColumn.minWidth = 48
         rowNumberColumn.maxWidth = 72
+        let rowNumberHeader = SelectableHeaderCell(textCell: "#")
+        rowNumberHeader.alignment = .center
+        rowNumberColumn.headerCell = rowNumberHeader
         tableView.addTableColumn(rowNumberColumn)
 
-        for (index, header) in tableDocument.headers.enumerated() {
+        let orderedIndexes = visibleColumnIndexes(for: tableDocument)
+        for index in orderedIndexes {
+            let header = tableDocument.headers[index]
             let identifier = NSUserInterfaceItemIdentifier(String(index))
             let column = NSTableColumn(identifier: identifier)
             let type = metadata.schemaEnabled ? schema.schema(for: header).type : .text
             column.title = metadata.schemaEnabled ? "\(header)  \(type.displayName)" : header
             column.minWidth = 80
             column.width = metadata.columnWidths[header] ?? max(120, min(260, CGFloat(header.count * 10 + 44)))
-            column.sortDescriptorPrototype = NSSortDescriptor(key: String(index), ascending: true)
+            let headerCell = SelectableHeaderCell(textCell: column.title)
+            headerCell.alignment = .center
+            column.headerCell = headerCell
             tableView.addTableColumn(column)
         }
+        updateHeaderSortState()
+    }
+
+    private func visibleColumnIndexes(for document: TableDocument) -> [Int] {
+        var indexes: [Int] = []
+        var used = Set<Int>()
+
+        for header in metadata.columnOrder {
+            if let index = document.headers.firstIndex(of: header), !used.contains(index) {
+                indexes.append(index)
+                used.insert(index)
+            }
+        }
+
+        for index in document.headers.indices where !used.contains(index) {
+            indexes.append(index)
+        }
+        return indexes
     }
 
     private func refreshFilterControls() {
@@ -1078,13 +2236,18 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func rebuildVisibleRows() {
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
         visibleRows = TableQueryEngine.visibleRows(
             in: tableDocument,
             search: searchField.stringValue,
             filter: activeFilter,
             sortDescriptor: tableView.sortDescriptors.first
         )
+        selectionRange = TableSelectionRange()
+        selectionMode = .cells
         tableView.reloadData()
+        updateHeaderSortState()
         updateStatus()
     }
 
@@ -1108,6 +2271,36 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableDocument?.canEditFormat == true && !editLocked
     }
 
+    // View-based NSTableView does not support column selection, so `tableView.selectedColumnIndexes`
+    // is always empty (AppKit even logs a warning). The authoritative selection is `selectionRange`.
+    private var singleSelectedCell: (visibleRow: Int, visibleColumn: Int)? {
+        guard selectionMode == .cells,
+              selectionRange.rows.count == 1,
+              selectionRange.columns.count == 1,
+              let row = selectionRange.rows.first,
+              let column = selectionRange.columns.first,
+              visibleRows.indices.contains(row),
+              isDataVisibleColumn(column) else {
+            return nil
+        }
+        return (row, column)
+    }
+
+    private var hasCopyableSelection: Bool {
+        if activeSelectedText()?.isEmpty == false {
+            return true
+        }
+        return !tableView.selectedRowIndexes.isEmpty && !selectedDataVisibleColumns().isEmpty
+    }
+
+    private var canEditSelectedCell: Bool {
+        isEditingEnabled && singleSelectedCell != nil
+    }
+
+    var canEditSelectedCellForMenu: Bool {
+        canEditSelectedCell
+    }
+
     private func modeDescription(for document: TableDocument) -> String {
         if document.readOnly {
             return "format read-only"
@@ -1115,28 +2308,46 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return editLocked ? "locked read-only" : "edit mode"
     }
 
+    private func setEnabled(_ enabled: Bool, on item: NSToolbarItem?) {
+        if item?.isEnabled != enabled {
+            item?.isEnabled = enabled
+        }
+    }
+
     private func updateToolbarState() {
         let canEditFormat = tableDocument?.canEditFormat == true
-        editModeItem?.isEnabled = canEditFormat
-        editModeItem?.label = isEditingEnabled ? "Lock" : "Edit"
-        editModeItem?.image = NSImage(
-            systemSymbolName: isEditingEnabled ? "lock.open" : "lock",
-            accessibilityDescription: isEditingEnabled ? "Lock" : "Edit"
-        )
-        addRowItem?.isEnabled = isEditingEnabled
-        deleteRowItem?.isEnabled = isEditingEnabled && !tableView.selectedRowIndexes.isEmpty
-        typeModeItem?.isEnabled = tableDocument != nil
-        typeModeItem?.label = metadata.schemaEnabled ? "Types On" : "Types Off"
-        typeModeItem?.image = NSImage(
-            systemSymbolName: metadata.schemaEnabled ? "tag.fill" : "tag",
-            accessibilityDescription: metadata.schemaEnabled ? "Types On" : "Types Off"
-        )
-        filterItem?.label = filterPanelVisible ? "Hide Filter" : "Filter"
-        filterItem?.image = NSImage(
-            systemSymbolName: filterPanelVisible ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle",
-            accessibilityDescription: filterPanelVisible ? "Hide Filter" : "Filter"
-        )
-        saveButton.isEnabled = tableDocument?.canEditFormat == true && tableDocument?.dirty == true
+        setEnabled(canEditFormat, on: editModeItem)
+        let editLabel = isEditingEnabled ? "Lock" : "Edit"
+        if editModeItem?.label != editLabel {
+            editModeItem?.label = editLabel
+            editModeItem?.image = NSImage(
+                systemSymbolName: isEditingEnabled ? "lock.open" : "lock",
+                accessibilityDescription: editLabel
+            )
+        }
+        setEnabled(isEditingEnabled, on: addRowItem)
+        setEnabled(isEditingEnabled && selectionMode == .rows && !selectionRange.rows.isEmpty, on: deleteRowItem)
+        setEnabled(tableDocument != nil, on: typeModeItem)
+        let typeLabel = metadata.schemaEnabled ? "Types On" : "Types Off"
+        if typeModeItem?.label != typeLabel {
+            typeModeItem?.label = typeLabel
+            typeModeItem?.image = NSImage(
+                systemSymbolName: metadata.schemaEnabled ? "tag.fill" : "tag",
+                accessibilityDescription: typeLabel
+            )
+        }
+        let filterLabel = filterPanelVisible ? "Hide Filter" : "Filter"
+        if filterItem?.label != filterLabel {
+            filterItem?.label = filterLabel
+            filterItem?.image = NSImage(
+                systemSymbolName: filterPanelVisible ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle",
+                accessibilityDescription: filterLabel
+            )
+        }
+        let canSave = tableDocument?.canEditFormat == true && tableDocument?.dirty == true
+        if saveButton.isEnabled != canSave {
+            saveButton.isEnabled = canSave
+        }
     }
 
     private func selectedDocumentRowIndexes() -> IndexSet {
@@ -1148,12 +2359,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func selectedDataColumnIndex() -> Int? {
-        let selectedColumn = tableView.selectedColumn
-        guard selectedColumn >= 0,
-              tableView.tableColumns.indices.contains(selectedColumn) else {
-            return nil
-        }
-        return Int(tableView.tableColumns[selectedColumn].identifier.rawValue)
+        selectedDataVisibleColumns().first.flatMap { Int(tableView.tableColumns[$0].identifier.rawValue) }
     }
 
     private func activeColumnIndex() -> Int? {
@@ -1182,10 +2388,285 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return Int(tableView.tableColumns[visibleColumn].identifier.rawValue)
     }
 
+    private func isDataVisibleColumn(_ visibleColumn: Int) -> Bool {
+        guard tableView.tableColumns.indices.contains(visibleColumn) else { return false }
+        return tableView.tableColumns[visibleColumn].identifier.rawValue != "rowNumber"
+    }
+
+    private func visibleColumn(forDataColumn dataColumn: Int) -> Int? {
+        tableView.tableColumns.firstIndex { column in
+            Int(column.identifier.rawValue) == dataColumn
+        }
+    }
+
+    private func dataVisibleColumnIndexes() -> IndexSet {
+        var indexes = IndexSet()
+        for visibleColumn in tableView.tableColumns.indices where isDataVisibleColumn(visibleColumn) {
+            indexes.insert(visibleColumn)
+        }
+        return indexes
+    }
+
+    private func selectedDataVisibleColumns() -> [Int] {
+        selectionRange.columns.filter { isDataVisibleColumn($0) }.sorted()
+    }
+
+    private func currentVisibleDataColumnOrder(in document: TableDocument) -> [Int]? {
+        let order = tableView.tableColumns.compactMap { column -> Int? in
+            guard let index = Int(column.identifier.rawValue),
+                  document.headers.indices.contains(index) else {
+                return nil
+            }
+            return index
+        }
+        return order.count == document.headers.count ? order : nil
+    }
+
+    private func activeSelectedText() -> String? {
+        if let selectedText = activeCellEditorSelectedText(), !selectedText.isEmpty {
+            return selectedText
+        }
+        return activeTextSelectionView?.selectedText
+    }
+
+    private func activeCellEditorSelectedText() -> String? {
+        guard let editor = activeCellEditor else {
+            return nil
+        }
+        let selectedRange = editor.selectedRange()
+        guard selectedRange.length > 0,
+              let range = Range(selectedRange, in: editor.string) else {
+            return nil
+        }
+        return String(editor.string[range])
+    }
+
+    private func refreshVisibleSelectionAppearance() {
+        selectionOverlayView.selectionRange = selectionRange
+        selectionOverlayView.isHidden = selectionRange.isEmpty
+        selectionOverlayView.frame = scrollView.contentView.bounds
+        selectionOverlayView.needsDisplay = true
+        if let headerView = tableView.headerView as? DataTableHeaderView {
+            headerView.highlightedColumns = (selectionRange.mode == .columns || selectionRange.mode == .all)
+                ? selectionRange.columns : []
+        }
+        updateHeaderSortState()
+        refreshVisibleCellSelectionStyles()
+    }
+
+    private func refreshVisibleCellSelectionStyles() {
+        let rowRange = tableView.rows(in: scrollView.contentView.bounds)
+        guard rowRange.location != NSNotFound, rowRange.length > 0 else { return }
+        let upperRow = min(rowRange.location + rowRange.length, tableView.numberOfRows)
+        guard rowRange.location < upperRow else { return }
+
+        for row in rowRange.location..<upperRow {
+            for column in 0..<tableView.numberOfColumns {
+                let view = tableView.view(atColumn: column, row: row, makeIfNecessary: false)
+                if let cell = view as? DataTextCellView {
+                    cell.selectionFill = isBodyCell(visibleRow: row, visibleColumn: column)
+                        ? NSColor.controlAccentColor.withAlphaComponent(0.10) : nil
+                } else if let cell = view as? NSTableCellView {
+                    applySelectionStyle(to: cell, visibleRow: row, visibleColumn: column)
+                }
+            }
+        }
+    }
+
+    private func updateHeaderSortState() {
+        guard let headerView = tableView.headerView as? DataTableHeaderView else { return }
+        guard let sortDescriptor = tableView.sortDescriptors.first,
+              let key = sortDescriptor.key,
+              let dataColumn = Int(key),
+              let visibleColumn = visibleColumn(forDataColumn: dataColumn) else {
+            headerView.activeSortColumn = nil
+            headerView.activeSortAscending = true
+            headerView.needsDisplay = true
+            return
+        }
+
+        headerView.activeSortColumn = visibleColumn
+        headerView.activeSortAscending = sortDescriptor.ascending
+        headerView.needsDisplay = true
+    }
+
+    private func showTextSelectionOverlay(for cell: DataTextCellView, anchorEvent: NSEvent, firstDragEvent: NSEvent) {
+        removeActiveTextSelectionView()
+
+        let cellFrameInTable = cell.convert(cell.bounds, to: tableView)
+        let overlay = CellTextSelectionOverlay(cellView: cell, frame: cellFrameInTable)
+        overlay.autoresizingMask = []
+
+        cell.isHidden = true
+        tableView.addSubview(overlay, positioned: .above, relativeTo: nil)
+        activeTextSelectionView = overlay
+        activeTextSelectionSource = cell
+
+        overlay.beginSelection(anchorEvent: anchorEvent, firstDragEvent: firstDragEvent)
+    }
+
+    private func showInlineCellEditor(for cell: DataTextCellView, initialText: String?, activationEvent: NSEvent?) {
+        let editable = isEditingEnabled
+        let cellFrameInTable = cell.convert(cell.bounds, to: tableView)
+        let editorFrame = cellFrameInTable.insetBy(dx: 1, dy: 2)
+        let editor = InlineCellEditor(frame: editorFrame)
+        editor.identifier = NSUserInterfaceItemIdentifier("InlineCellEditor")
+        editor.editHandler = self
+        editor.delegate = self
+        editor.commitsChanges = editable
+        editor.isRichText = false
+        editor.importsGraphics = false
+        editor.allowsUndo = true
+        editor.drawsBackground = true
+        editor.backgroundColor = .textBackgroundColor
+        editor.font = cell.font
+        editor.alignment = cell.alignment
+        editor.textColor = .labelColor
+        editor.insertionPointColor = .controlAccentColor
+        editor.isEditable = editable
+        editor.isSelectable = true
+        editor.isHorizontallyResizable = false
+        editor.isVerticallyResizable = false
+        editor.textContainerInset = NSSize(width: 7, height: max(0, (editorFrame.height - cell.font.boundingRectForFont.height) / 2 - 1))
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainer?.heightTracksTextView = true
+        editor.string = editable ? (initialText ?? cell.displayString) : cell.displayString
+        editor.autoresizingMask = []
+
+        cell.isHidden = true
+        tableView.addSubview(editor, positioned: .above, relativeTo: nil)
+        activeCellEditor = editor
+        activeCellEditorSource = cell
+
+        window?.makeFirstResponder(editor)
+
+        DispatchQueue.main.async { [weak self, weak editor, weak cell] in
+            guard let self,
+                  let editor,
+                  editor === self.activeCellEditor,
+                  let cell else {
+                return
+            }
+            let selectedRange = self.initialEditorSelectedRange(
+                for: editor,
+                source: cell,
+                initialText: initialText,
+                activationEvent: activationEvent
+            )
+            editor.setSelectedRange(selectedRange)
+        }
+    }
+
+    private func initialEditorSelectedRange(
+        for editor: InlineCellEditor,
+        source: DataTextCellView,
+        initialText: String?,
+        activationEvent: NSEvent?
+    ) -> NSRange {
+        if let initialText, editor.commitsChanges {
+            return NSRange(location: (initialText as NSString).length, length: 0)
+        }
+
+        if let activationEvent {
+            let point = source.convert(activationEvent.locationInWindow, from: nil)
+            let insertionIndex = source.insertionIndex(for: point)
+            return NSRange(location: insertionIndex, length: 0)
+        }
+
+        return NSRange(location: 0, length: (editor.string as NSString).length)
+    }
+
+    private func updateActiveCellEditorFrame() {
+        guard let editor = activeCellEditor,
+              let source = activeCellEditorSource else {
+            return
+        }
+        editor.frame = source.convert(source.bounds, to: tableView).insetBy(dx: 1, dy: 2)
+        editor.textContainerInset = NSSize(width: 7, height: max(0, (editor.frame.height - source.font.boundingRectForFont.height) / 2 - 1))
+    }
+
+    private func removeActiveTextSelectionView(reloadIfChanged: Bool = false) {
+        guard let overlay = activeTextSelectionView else { return }
+        overlay.removeFromSuperview()
+        activeTextSelectionView = nil
+        activeTextSelectionSource?.isHidden = false
+        activeTextSelectionSource = nil
+    }
+
+    private func removeActiveCellEditor(commit: Bool) {
+        guard activeCellEditor != nil else { return }
+        if commit {
+            commitActiveCellEditor()
+            return
+        }
+        cancelActiveCellEditor()
+    }
+
+    private func commitActiveCellEditor() {
+        guard let editor = activeCellEditor,
+              let source = activeCellEditorSource else {
+            return
+        }
+        let newValue = editor.string
+        commitActiveCellEditor(value: newValue, editor: editor, source: source)
+    }
+
+    private func commitActiveCellEditor(value newValue: String) {
+        guard let editor = activeCellEditor,
+              let source = activeCellEditorSource else {
+            return
+        }
+        commitActiveCellEditor(value: newValue, editor: editor, source: source)
+    }
+
+    private func commitActiveCellEditor(value newValue: String, editor: InlineCellEditor, source: DataTextCellView) {
+        editor.removeFromSuperview()
+        activeCellEditor = nil
+        source.isHidden = false
+        activeCellEditorSource = nil
+        window?.makeFirstResponder(tableView)
+
+        guard editor.commitsChanges else { return }
+        let rawValue = rawValueForEditedText(newValue, columnIndex: source.columnIndex, rawValue: source.rawValue)
+        guard rawValue != source.rawValue else { return }
+        tableDocument?.setValue(rawValue, row: source.documentRow, column: source.columnIndex)
+        source.rawValue = rawValue
+        if let tableDocument,
+           tableDocument.headers.indices.contains(source.columnIndex) {
+            let columnSchema = metadata.schemaEnabled ? schema.schema(for: tableDocument.headers[source.columnIndex]) : ColumnSchema(type: .text)
+            source.displayString = displayValue(rawValue, schema: columnSchema)
+        } else {
+            source.displayString = rawValue
+        }
+        if let visibleRow = visibleRows.firstIndex(of: source.documentRow) {
+            tableView.reloadData(
+                forRowIndexes: IndexSet(integer: visibleRow),
+                columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns)
+            )
+            refreshVisibleSelectionAppearance()
+        }
+        updateStatus()
+    }
+
+    private func cancelActiveCellEditor() {
+        activeCellEditor?.removeFromSuperview()
+        activeCellEditor = nil
+        activeCellEditorSource?.isHidden = false
+        activeCellEditorSource = nil
+        window?.makeFirstResponder(tableView)
+    }
+
+    private func indexSet(from start: Int, to end: Int) -> IndexSet {
+        let lower = min(start, end)
+        let upper = max(start, end)
+        return IndexSet(integersIn: lower..<(upper + 1))
+    }
+
     private func selectedTabDelimitedText() -> String {
         guard let tableDocument else { return "" }
         let selectedRows = tableView.selectedRowIndexes
-        let selectedColumns = tableView.selectedColumnIndexes
+        let selectedColumns = selectedDataVisibleColumns()
         guard !selectedRows.isEmpty else { return "" }
 
         let dataColumns: [Int]
@@ -1211,14 +2692,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func captureMetadata() {
         guard let tableDocument else { return }
         var widths: [String: Double] = [:]
+        var order: [String] = []
         for column in tableView.tableColumns {
             guard let index = Int(column.identifier.rawValue),
                   tableDocument.headers.indices.contains(index) else {
                 continue
             }
             widths[tableDocument.headers[index]] = Double(column.width)
+            order.append(tableDocument.headers[index])
         }
         metadata.columnWidths = widths
+        metadata.columnOrder = order
     }
 
     private func saveCurrentMetadata() {
@@ -1232,32 +2716,31 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         SchemaMetadataStore.save(schema, for: tableDocument.url)
     }
 
-    private func configure(textField: DataCellTextField, value: String, schema: ColumnSchema) {
-        textField.alignment = schema.type == .number ? .right : .left
-        textField.textColor = .labelColor
-        textField.backgroundColor = .clear
-        textField.stringValue = displayValue(value, schema: schema)
+    private func configure(textCell: DataTextCellView, value: String, schema: ColumnSchema) {
+        textCell.alignment = schema.type == .number ? .right : .left
+        textCell.textColor = .labelColor
+        textCell.displayString = displayValue(value, schema: schema)
 
         switch schema.type {
         case .url:
-            textField.textColor = .linkColor
+            textCell.textColor = .linkColor
         case .select, .multiSelect, .status:
-            textField.textColor = colorForTag(value, schema: schema)
+            textCell.textColor = colorForTag(value, schema: schema)
         case .checkbox:
-            textField.alignment = .center
+            textCell.alignment = .center
         default:
             break
         }
     }
 
-    private func rawValueForEditedText(_ text: String, textField: DataCellTextField) -> String {
+    private func rawValueForEditedText(_ text: String, columnIndex: Int, rawValue: String) -> String {
         guard let tableDocument,
-              tableDocument.headers.indices.contains(textField.columnIndex) else {
+              tableDocument.headers.indices.contains(columnIndex) else {
             return text
         }
-        let columnSchema = schema.schema(for: tableDocument.headers[textField.columnIndex])
-        if text == displayValue(textField.rawValue, schema: columnSchema) {
-            return textField.rawValue
+        let columnSchema = schema.schema(for: tableDocument.headers[columnIndex])
+        if text == displayValue(rawValue, schema: columnSchema) {
+            return rawValue
         }
         if columnSchema.type == .checkbox {
             let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1267,6 +2750,15 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             return "false"
         }
         return text
+    }
+
+    private func displayValueForRawValue(_ value: String, columnIndex: Int) -> String {
+        guard let tableDocument,
+              tableDocument.headers.indices.contains(columnIndex) else {
+            return value
+        }
+        let columnSchema = metadata.schemaEnabled ? schema.schema(for: tableDocument.headers[columnIndex]) : ColumnSchema(type: .text)
+        return displayValue(value, schema: columnSchema)
     }
 
     private func displayValue(_ value: String, schema: ColumnSchema) -> String {
@@ -1316,7 +2808,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 continue
             }
             let ext = url.pathExtension.lowercased()
-            if ["csv", "tsv", "tab", "json", "jsonl", "ndjson", "xlsx"].contains(ext) {
+            if ["csv", "tsv", "tab", "json", "jsonl", "ndjson", "xlsx", "parquet", "pq"].contains(ext) {
                 return url
             }
         }
@@ -1325,6 +2817,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 }
 
 private extension NSToolbarItem.Identifier {
+    static let newTab = NSToolbarItem.Identifier("LightDataNewTab")
     static let openFile = NSToolbarItem.Identifier("LightDataOpenFile")
     static let saveFile = NSToolbarItem.Identifier("LightDataSaveFile")
     static let fileInfo = NSToolbarItem.Identifier("LightDataFileInfo")

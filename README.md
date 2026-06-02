@@ -5,9 +5,11 @@ LightData is a lightweight local-first macOS data viewer/editor for structured f
 ## Current MVP
 
 - Native macOS AppKit UI.
-- Opens `.csv`, `.tsv`, `.json`, `.jsonl`, and basic `.xlsx` files.
+- Opens `.csv`, `.tsv`, `.json`, `.jsonl`, basic `.xlsx`, and `.parquet` / `.pq` files.
 - CSV/TSV/JSON/JSONL support viewing, editing, search, filtering, sorting, and safe save.
-- XLSX is read-only in this MVP. It supports basic first-sheet viewing for normal workbooks.
+- XLSX and Parquet are read-only in this MVP. XLSX supports basic first-sheet viewing for normal workbooks; Parquet is loaded through DuckDB.
+- Per-file view and schema metadata are stored centrally under `~/Library/Application Support/LightData/Metadata`.
+  LightData uses the macOS file resource identifier when available, so metadata can usually survive file renames and moves on the same filesystem.
 - Finder-oriented app bundle packaging via `Scripts/build-app.sh`.
 
 ## Build
@@ -29,7 +31,7 @@ Scripts/build-app.sh
 open .build/app/LightData.app
 ```
 
-The app bundle declares file associations for CSV, TSV, JSON, JSONL, and XLSX.
+The app bundle declares file associations for CSV, TSV, JSON, JSONL, XLSX, Parquet, and PQ.
 
 Build the Finder Quick Look generator:
 
