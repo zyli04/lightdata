@@ -1,0 +1,35 @@
+name: LightData
+
+options:
+  bundleIdPrefix: com.zyli
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  LightDataCore:
+    path: LightDataCore
+
+targets:
+  LightData:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: LightDataCore
+        product: LightDataCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zyli.LightData
+        PRODUCT_NAME: LightData
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        # Programmatic AppKit entry point (App/main.swift); no storyboard.
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        INFOPLIST_KEY_NSHighResolutionCapable: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic

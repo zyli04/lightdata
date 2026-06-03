@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "LightData",
+    name: "LightDataCore",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "LightData", targets: ["LightData"])
+        .library(name: "LightDataCore", targets: ["LightDataCore"])
     ],
     dependencies: [
         .package(url: "https://github.com/duckdb/duckdb-swift", .upToNextMajor(from: "1.0.0"))
@@ -18,15 +18,6 @@ let package = Package(
             name: "LightDataCore",
             dependencies: [
                 .product(name: "DuckDB", package: "duckdb-swift")
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v5)
-            ]
-        ),
-        .executableTarget(
-            name: "LightData",
-            dependencies: [
-                "LightDataCore"
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
