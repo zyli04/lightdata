@@ -1,6 +1,6 @@
 import Foundation
 
-enum ColumnType: String, Codable, CaseIterable {
+public enum ColumnType: String, Codable, CaseIterable {
     case text
     case number
     case date
@@ -10,7 +10,7 @@ enum ColumnType: String, Codable, CaseIterable {
     case multiSelect
     case status
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .text: "Text"
         case .number: "Number"
@@ -24,27 +24,50 @@ enum ColumnType: String, Codable, CaseIterable {
     }
 }
 
-struct SelectOption: Codable, Equatable {
-    var name: String
-    var color: String
+public struct SelectOption: Codable, Equatable {
+    public var name: String
+    public var color: String
+
+    public init(name: String, color: String) {
+        self.name = name
+        self.color = color
+    }
 }
 
-struct ColumnSchema: Codable, Equatable {
-    var type: ColumnType
-    var options: [SelectOption] = []
-    var multiSelectSeparator: String = ","
-    var trueValues: [String] = ["true", "yes", "1", "y"]
-    var falseValues: [String] = ["false", "no", "0", "n"]
+public struct ColumnSchema: Codable, Equatable {
+    public var type: ColumnType
+    public var options: [SelectOption] = []
+    public var multiSelectSeparator: String = ","
+    public var trueValues: [String] = ["true", "yes", "1", "y"]
+    public var falseValues: [String] = ["false", "no", "0", "n"]
+
+    public init(
+        type: ColumnType,
+        options: [SelectOption] = [],
+        multiSelectSeparator: String = ",",
+        trueValues: [String] = ["true", "yes", "1", "y"],
+        falseValues: [String] = ["false", "no", "0", "n"]
+    ) {
+        self.type = type
+        self.options = options
+        self.multiSelectSeparator = multiSelectSeparator
+        self.trueValues = trueValues
+        self.falseValues = falseValues
+    }
 }
 
-struct TableSchema: Codable, Equatable {
-    var columns: [String: ColumnSchema] = [:]
+public struct TableSchema: Codable, Equatable {
+    public var columns: [String: ColumnSchema] = [:]
 
-    func schema(for header: String) -> ColumnSchema {
+    public init(columns: [String: ColumnSchema] = [:]) {
+        self.columns = columns
+    }
+
+    public func schema(for header: String) -> ColumnSchema {
         columns[header] ?? ColumnSchema(type: .text)
     }
 
-    mutating func setType(_ type: ColumnType, for header: String, sampleValues: [String]) {
+    public mutating func setType(_ type: ColumnType, for header: String, sampleValues: [String]) {
         var schema = columns[header] ?? ColumnSchema(type: type)
         schema.type = type
         if type == .select || type == .multiSelect || type == .status {
@@ -53,12 +76,12 @@ struct TableSchema: Codable, Equatable {
         columns[header] = schema
     }
 
-    mutating func removeMissingColumns(validHeaders: [String]) {
+    public mutating func removeMissingColumns(validHeaders: [String]) {
         let valid = Set(validHeaders)
         columns = columns.filter { valid.contains($0.key) }
     }
 
-    static func inferred(headers: [String], rows: [[String]]) -> TableSchema {
+    public static func inferred(headers: [String], rows: [[String]]) -> TableSchema {
         var schema = TableSchema()
         for (index, header) in headers.enumerated() {
             let sample = rows.prefix(200).compactMap { row in

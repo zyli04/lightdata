@@ -1,6 +1,6 @@
 import Foundation
 
-enum DelimitedTextParser {
+public enum DelimitedTextParser {
     static func readAuto(url: URL) throws -> ParsedTable {
         let decoded = try FileTextDecoder.decode(url: url)
         let delimiter = detectDelimiter(in: decoded.text)
@@ -44,7 +44,7 @@ enum DelimitedTextParser {
         try AtomicFileWriter.write(FileTextDecoder.encode(output, encoding: encoding), to: url)
     }
 
-    static func parse(_ text: String, delimiter: Character) -> [[String]] {
+    public static func parse(_ text: String, delimiter: Character) -> [[String]] {
         var records: [[String]] = []
         var record: [String] = []
         var field = ""

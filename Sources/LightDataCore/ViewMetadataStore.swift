@@ -1,13 +1,13 @@
 import Foundation
 
-struct ViewMetadata: Codable {
-    var columnWidths: [String: Double] = [:]
-    var columnOrder: [String] = []
-    var schemaEnabled: Bool = false
+public struct ViewMetadata: Codable {
+    public var columnWidths: [String: Double] = [:]
+    public var columnOrder: [String] = []
+    public var schemaEnabled: Bool = false
 
-    init() {}
+    public init() {}
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         columnWidths = try container.decodeIfPresent([String: Double].self, forKey: .columnWidths) ?? [:]
         columnOrder = try container.decodeIfPresent([String].self, forKey: .columnOrder) ?? []
@@ -15,8 +15,8 @@ struct ViewMetadata: Codable {
     }
 }
 
-enum ViewMetadataStore {
-    static func load(for fileURL: URL) -> ViewMetadata {
+public enum ViewMetadataStore {
+    public static func load(for fileURL: URL) -> ViewMetadata {
         let url = MetadataLocation.centralizedURL(for: fileURL, kind: "views")
         if let data = try? Data(contentsOf: url),
            let metadata = try? JSONDecoder().decode(ViewMetadata.self, from: data) {
@@ -25,7 +25,7 @@ enum ViewMetadataStore {
         return ViewMetadata()
     }
 
-    static func save(_ metadata: ViewMetadata, for fileURL: URL) {
+    public static func save(_ metadata: ViewMetadata, for fileURL: URL) {
         let url = MetadataLocation.centralizedURL(for: fileURL, kind: "views")
         do {
             try MetadataLocation.ensureMetadataDirectory()

@@ -38,6 +38,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
@@ -62,6 +64,26 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# App icon: if Resources/AppIcon.png (1024x1024) exists, generate AppIcon.icns
+# from it; otherwise use a prebuilt Resources/AppIcon.icns if present.
+ICON_PNG="$ROOT_DIR/Resources/AppIcon.png"
+ICON_ICNS="$ROOT_DIR/Resources/AppIcon.icns"
+if [ -f "$ICON_PNG" ]; then
+  ICONSET="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$ICONSET"
+  for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$ICON_PNG" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    sips -z "$((size * 2))" "$((size * 2))" "$ICON_PNG" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$ICON_ICNS"
+  rm -rf "$(dirname "$ICONSET")"
+fi
+if [ -f "$ICON_ICNS" ]; then
+  cp "$ICON_ICNS" "$RESOURCES_DIR/AppIcon.icns"
+else
+  echo "Note: no Resources/AppIcon.png or Resources/AppIcon.icns found; building without a custom icon."
+fi
 
 codesign --force --deep --sign - "$APP_DIR"
 

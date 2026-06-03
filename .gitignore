@@ -16,3 +16,6 @@ DerivedData/
 
 # Visual brainstorming companion scratch files
 .superpowers/
+
+# Generated app icon (built from Resources/AppIcon.png by build-app.sh)
+Resources/AppIcon.icns

@@ -1,6 +1,6 @@
 import Foundation
 
-enum TableFileFormat: Equatable {
+public enum TableFileFormat: Equatable {
     case csv
     case tsv
     case json
@@ -8,7 +8,7 @@ enum TableFileFormat: Equatable {
     case xlsx
     case parquet
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .csv: "CSV"
         case .tsv: "TSV"
@@ -19,7 +19,7 @@ enum TableFileFormat: Equatable {
         }
     }
 
-    var delimiter: Character? {
+    public var delimiter: Character? {
         switch self {
         case .csv: ","
         case .tsv: "\t"
@@ -28,7 +28,7 @@ enum TableFileFormat: Equatable {
     }
 }
 
-enum DelimiterKind: Codable, Equatable {
+public enum DelimiterKind: Codable, Equatable {
     case comma
     case tab
     case semicolon
@@ -36,7 +36,7 @@ enum DelimiterKind: Codable, Equatable {
     case custom(String)
     case none
 
-    init(character: Character?) {
+    public init(character: Character?) {
         switch character {
         case ",": self = .comma
         case "\t": self = .tab
@@ -47,7 +47,7 @@ enum DelimiterKind: Codable, Equatable {
         }
     }
 
-    var character: Character? {
+    public var character: Character? {
         switch self {
         case .comma: ","
         case .tab: "\t"
@@ -58,7 +58,7 @@ enum DelimiterKind: Codable, Equatable {
         }
     }
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .comma: "Comma"
         case .tab: "Tab"
@@ -70,13 +70,20 @@ enum DelimiterKind: Codable, Equatable {
     }
 }
 
-struct FileOpenInfo: Codable, Equatable {
-    var encoding: TextEncodingKind?
-    var lineEnding: LineEnding?
-    var delimiter: DelimiterKind
-    var readOnlyReason: String?
+public struct FileOpenInfo: Codable, Equatable {
+    public var encoding: TextEncodingKind?
+    public var lineEnding: LineEnding?
+    public var delimiter: DelimiterKind
+    public var readOnlyReason: String?
 
-    var displaySummary: String {
+    public init(encoding: TextEncodingKind?, lineEnding: LineEnding?, delimiter: DelimiterKind, readOnlyReason: String?) {
+        self.encoding = encoding
+        self.lineEnding = lineEnding
+        self.delimiter = delimiter
+        self.readOnlyReason = readOnlyReason
+    }
+
+    public var displaySummary: String {
         var parts: [String] = []
         if let encoding {
             parts.append(encoding.displayName)
@@ -94,7 +101,7 @@ struct FileOpenInfo: Codable, Equatable {
     }
 }
 
-enum TableDocumentError: LocalizedError {
+public enum TableDocumentError: LocalizedError {
     case unsupportedFile(URL)
     case emptyFile
     case saveUnsupported(String)
@@ -102,7 +109,7 @@ enum TableDocumentError: LocalizedError {
     case invalidParquet(String)
     case fileChangedExternally(URL)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .unsupportedFile(let url):
             "Unsupported file type: \(url.lastPathComponent)"
@@ -120,22 +127,22 @@ enum TableDocumentError: LocalizedError {
     }
 }
 
-struct TableDocument {
-    let url: URL
-    let format: TableFileFormat
-    var headers: [String]
-    var rows: [[String]]
-    var readOnly: Bool
-    var dirty: Bool = false
-    var sheetName: String?
-    var openInfo: FileOpenInfo
-    var loadedModificationDate: Date?
+public struct TableDocument {
+    public let url: URL
+    public let format: TableFileFormat
+    public var headers: [String]
+    public var rows: [[String]]
+    public var readOnly: Bool
+    public var dirty: Bool = false
+    public var sheetName: String?
+    public var openInfo: FileOpenInfo
+    public var loadedModificationDate: Date?
 
-    var rowCount: Int { rows.count }
-    var columnCount: Int { headers.count }
-    var canEditFormat: Bool { !readOnly }
+    public var rowCount: Int { rows.count }
+    public var columnCount: Int { headers.count }
+    public var canEditFormat: Bool { !readOnly }
 
-    static func load(url: URL, delimiterOverride: Character? = nil) throws -> TableDocument {
+    public static func load(url: URL, delimiterOverride: Character? = nil) throws -> TableDocument {
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "csv":
@@ -161,7 +168,7 @@ struct TableDocument {
         }
     }
 
-    mutating func setValue(_ value: String, row: Int, column: Int) {
+    public mutating func setValue(_ value: String, row: Int, column: Int) {
         guard !readOnly, rows.indices.contains(row), headers.indices.contains(column) else { return }
         while rows[row].count < headers.count {
             rows[row].append("")
@@ -172,7 +179,7 @@ struct TableDocument {
         }
     }
 
-    mutating func addRow(after row: Int? = nil) {
+    public mutating func addRow(after row: Int? = nil) {
         guard !readOnly else { return }
         let newRow = Array(repeating: "", count: headers.count)
         if let row, rows.indices.contains(row) {
@@ -183,7 +190,7 @@ struct TableDocument {
         dirty = true
     }
 
-    mutating func deleteRows(_ indexes: IndexSet) {
+    public mutating func deleteRows(_ indexes: IndexSet) {
         guard !readOnly else { return }
         for index in indexes.sorted(by: >) where rows.indices.contains(index) {
             rows.remove(at: index)
@@ -191,7 +198,7 @@ struct TableDocument {
         dirty = true
     }
 
-    mutating func moveRows(_ indexes: IndexSet, to target: Int) {
+    public mutating func moveRows(_ indexes: IndexSet, to target: Int) {
         guard !readOnly else { return }
         let sorted = indexes.sorted().filter { rows.indices.contains($0) }
         guard !sorted.isEmpty else { return }
@@ -205,7 +212,7 @@ struct TableDocument {
         dirty = true
     }
 
-    mutating func renameColumn(at index: Int, to newName: String) {
+    public mutating func renameColumn(at index: Int, to newName: String) {
         guard !readOnly, headers.indices.contains(index) else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         headers[index] = trimmed.isEmpty ? "Column \(index + 1)" : trimmed
@@ -213,7 +220,7 @@ struct TableDocument {
         dirty = true
     }
 
-    mutating func deleteColumn(at index: Int) {
+    public mutating func deleteColumn(at index: Int) {
         guard !readOnly, headers.indices.contains(index), headers.count > 1 else { return }
         headers.remove(at: index)
         for rowIndex in rows.indices where rows[rowIndex].indices.contains(index) {
@@ -222,7 +229,7 @@ struct TableDocument {
         dirty = true
     }
 
-    mutating func reorderColumns(to order: [Int]) {
+    public mutating func reorderColumns(to order: [Int]) {
         guard !readOnly,
               order.count == headers.count,
               Set(order) == Set(headers.indices) else {
@@ -239,7 +246,7 @@ struct TableDocument {
         dirty = true
     }
 
-    mutating func pasteRows(_ pastedRows: [[String]], startingAt startRow: Int, column startColumn: Int) {
+    public mutating func pasteRows(_ pastedRows: [[String]], startingAt startRow: Int, column startColumn: Int) {
         guard !readOnly, !pastedRows.isEmpty, headers.indices.contains(startColumn) else { return }
         while rows.count <= startRow + pastedRows.count - 1 {
             rows.append(Array(repeating: "", count: headers.count))
@@ -259,7 +266,7 @@ struct TableDocument {
         dirty = true
     }
 
-    mutating func save() throws {
+    public mutating func save() throws {
         guard !readOnly else {
             throw TableDocumentError.saveUnsupported("\(format.displayName) is read-only in this MVP.")
         }

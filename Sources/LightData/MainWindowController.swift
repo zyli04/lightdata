@@ -1,4 +1,5 @@
 import AppKit
+import LightDataCore
 
 protocol DataCellMouseHandling: AnyObject {
     func dataCellControlShouldHandleMouseDown(visibleRow: Int, columnIndex: Int, event: NSEvent) -> Bool

@@ -1,4 +1,5 @@
 import AppKit
+import LightDataCore
 
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--dump" {
     do {

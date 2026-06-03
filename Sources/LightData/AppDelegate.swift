@@ -1,4 +1,5 @@
 import AppKit
+import LightDataCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowControllers: [MainWindowController] = []

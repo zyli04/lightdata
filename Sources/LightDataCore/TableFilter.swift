@@ -1,18 +1,24 @@
 import Foundation
 
-enum FilterOperator: String, CaseIterable {
+public enum FilterOperator: String, CaseIterable {
     case contains = "contains"
     case equals = "equals"
     case empty = "is empty"
     case notEmpty = "not empty"
 }
 
-struct TableFilter {
-    var columnIndex: Int
-    var operation: FilterOperator
-    var value: String
+public struct TableFilter {
+    public var columnIndex: Int
+    public var operation: FilterOperator
+    public var value: String
 
-    func matches(row: [String]) -> Bool {
+    public init(columnIndex: Int, operation: FilterOperator, value: String) {
+        self.columnIndex = columnIndex
+        self.operation = operation
+        self.value = value
+    }
+
+    public func matches(row: [String]) -> Bool {
         let cell = columnIndex < row.count ? row[columnIndex] : ""
         switch operation {
         case .contains:
@@ -27,8 +33,8 @@ struct TableFilter {
     }
 }
 
-enum TableQueryEngine {
-    static func visibleRows(
+public enum TableQueryEngine {
+    public static func visibleRows(
         in document: TableDocument?,
         search: String,
         filter: TableFilter?,

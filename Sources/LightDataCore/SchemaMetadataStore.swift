@@ -1,7 +1,7 @@
 import Foundation
 
-enum SchemaMetadataStore {
-    static func load(for fileURL: URL, headers: [String], rows: [[String]]) -> TableSchema {
+public enum SchemaMetadataStore {
+    public static func load(for fileURL: URL, headers: [String], rows: [[String]]) -> TableSchema {
         let url = MetadataLocation.centralizedURL(for: fileURL, kind: "schema")
         if let data = try? Data(contentsOf: url),
            var schema = try? JSONDecoder().decode(TableSchema.self, from: data) {
@@ -11,7 +11,7 @@ enum SchemaMetadataStore {
         return TableSchema.inferred(headers: headers, rows: rows)
     }
 
-    static func save(_ schema: TableSchema, for fileURL: URL) {
+    public static func save(_ schema: TableSchema, for fileURL: URL) {
         let url = MetadataLocation.centralizedURL(for: fileURL, kind: "schema")
         do {
             try MetadataLocation.ensureMetadataDirectory()

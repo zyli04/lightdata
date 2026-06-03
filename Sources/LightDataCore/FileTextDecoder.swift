@@ -1,12 +1,12 @@
 import Foundation
 
-enum LineEnding: String, Codable {
+public enum LineEnding: String, Codable {
     case lf
     case crlf
     case cr
     case unknown
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .lf: "LF"
         case .crlf: "CRLF"
@@ -15,7 +15,7 @@ enum LineEnding: String, Codable {
         }
     }
 
-    var stringValue: String {
+    public var stringValue: String {
         switch self {
         case .lf, .unknown: "\n"
         case .crlf: "\r\n"
@@ -24,13 +24,13 @@ enum LineEnding: String, Codable {
     }
 }
 
-enum TextEncodingKind: Codable, Equatable {
+public enum TextEncodingKind: Codable, Equatable {
     case utf8
     case utf8BOM
     case gb18030
     case latin1
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .utf8: "UTF-8"
         case .utf8BOM: "UTF-8 BOM"

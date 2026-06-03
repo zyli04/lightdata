@@ -14,10 +14,19 @@ let package = Package(
         .package(url: "https://github.com/duckdb/duckdb-swift", .upToNextMajor(from: "1.0.0"))
     ],
     targets: [
+        .target(
+            name: "LightDataCore",
+            dependencies: [
+                .product(name: "DuckDB", package: "duckdb-swift")
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .executableTarget(
             name: "LightData",
             dependencies: [
-                .product(name: "DuckDB", package: "duckdb-swift")
+                "LightDataCore"
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
