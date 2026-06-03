@@ -10,30 +10,25 @@ LightData is a lightweight local-first macOS data viewer/editor for structured f
 - XLSX and Parquet are read-only in this MVP. XLSX supports basic first-sheet viewing for normal workbooks; Parquet is loaded through DuckDB.
 - Per-file view and schema metadata are stored centrally under `~/Library/Application Support/LightData/Metadata`.
   LightData uses the macOS file resource identifier when available, so metadata can usually survive file renames and moves on the same filesystem.
-- Finder-oriented app bundle packaging via `Scripts/build-app.sh`.
+- Xcode-based macOS app bundle (with Bundle ID, code signing, and file associations).
 
-## Build
+## Development
 
-```sh
-swift build
-```
-
-Run from source:
+Open the Xcode project:
 
 ```sh
-swift run LightData /path/to/data.csv
+open LightData.xcodeproj
 ```
 
-Build a local `.app` bundle:
+Select the **LightData** scheme, target **My Mac**, then **⌘R** to build and run.
 
-```sh
-Scripts/build-app.sh
-open .build/app/LightData.app
-```
+### Project structure
 
-The app bundle declares file associations for CSV, TSV, JSON, JSONL, XLSX, Parquet, and PQ.
+- **LightDataCore/** — portable core library (parsers, table model, query/filter, schema, metadata). Zero AppKit dependencies; decoupled for future iOS / cross-platform reuse.
+- **App/** — macOS UI (AppKit). Depends on `LightDataCore` as a local Swift package.
+- **`project.yml`** — XcodeGen spec; if you change project structure, regenerate with `xcodegen generate`.
 
-Build the Finder Quick Look generator:
+### Quick Look generator
 
 ```sh
 Scripts/build-quicklook.sh
