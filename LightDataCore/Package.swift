@@ -22,6 +22,16 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
+        ),
+        .testTarget(
+            name: "LightDataCoreTests",
+            dependencies: [
+                "LightDataCore",
+                .product(name: "DuckDB", package: "duckdb-swift")
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
         )
     ]
 )

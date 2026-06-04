@@ -1,13 +1,13 @@
 import Foundation
 
-public enum FilterOperator: String, CaseIterable {
+public enum FilterOperator: String, CaseIterable, Equatable {
     case contains = "contains"
     case equals = "equals"
     case empty = "is empty"
     case notEmpty = "not empty"
 }
 
-public struct TableFilter {
+public struct TableFilter: Equatable {
     public var columnIndex: Int
     public var operation: FilterOperator
     public var value: String
