@@ -1,5 +1,6 @@
 import AppKit
 import LightDataCore
+import UniformTypeIdentifiers
 
 protocol DataCellMouseHandling: AnyObject {
     func dataCellControlShouldHandleMouseDown(visibleRow: Int, columnIndex: Int, event: NSEvent) -> Bool
@@ -785,6 +786,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private weak var activeCellEditorSource: DataTextCellView?
     private var didBuildInterface = false
     private var appearanceObservation: NSKeyValueObservation?
+    private weak var saveAsPanel: NSSavePanel?
+    private var saveAsFormats: [TableFileFormat] = []
 
     convenience init() {
         let window = NSWindow(
@@ -855,6 +858,87 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             updateToolbarState()
         } catch {
             showError(error)
+        }
+    }
+
+    /// "Save As": writes the current contents to a new file/format, then re-points this
+    /// window at the new file (the original file is left untouched). Saving a read-only
+    /// document (XLSX/Parquet) to an editable format is how it becomes editable.
+    func saveDocumentAs() {
+        guard var current = tableDocument, let window else { return }
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
+
+        // Apply any pending visual column reorder so the written file matches what's shown.
+        if documentColumnOrderDirty,
+           let order = currentVisibleDataColumnOrder(in: current),
+           order != Array(current.headers.indices) {
+            current.reorderColumns(to: order)
+        }
+
+        let formats = TableFileFormat.writableFormats
+        let defaultFormat = formats.contains(current.format) ? current.format : .csv
+
+        let popup = NSPopUpButton(frame: NSRect(x: 80, y: 11, width: 220, height: 25))
+        for format in formats {
+            popup.addItem(withTitle: "\(format.displayName) (.\(format.fileExtension))")
+        }
+        popup.selectItem(at: formats.firstIndex(of: defaultFormat) ?? 0)
+        popup.target = self
+        popup.action = #selector(saveAsFormatChanged(_:))
+
+        let label = NSTextField(labelWithString: "Format:")
+        label.frame = NSRect(x: 16, y: 14, width: 60, height: 22)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 50))
+        accessory.addSubview(label)
+        accessory.addSubview(popup)
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.title = "Save As"
+        panel.accessoryView = accessory
+        panel.allowedContentTypes = [utType(for: defaultFormat)]
+        panel.nameFieldStringValue = "\(current.url.deletingPathExtension().lastPathComponent).\(defaultFormat.fileExtension)"
+
+        saveAsPanel = panel
+        saveAsFormats = formats
+
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            self.saveAsPanel = nil
+            guard response == .OK, var targetURL = panel.url else { return }
+            let format = formats[popup.indexOfSelectedItem]
+            if targetURL.pathExtension.lowercased() != format.fileExtension {
+                targetURL.deletePathExtension()
+                targetURL.appendPathExtension(format.fileExtension)
+            }
+            do {
+                try current.write(to: targetURL, as: format)
+                self.open(url: targetURL)
+                NSDocumentController.shared.noteNewRecentDocumentURL(targetURL)
+            } catch {
+                self.showError(error)
+            }
+        }
+    }
+
+    @objc private func saveAsFormatChanged(_ sender: NSPopUpButton) {
+        guard let panel = saveAsPanel,
+              saveAsFormats.indices.contains(sender.indexOfSelectedItem) else { return }
+        let format = saveAsFormats[sender.indexOfSelectedItem]
+        panel.allowedContentTypes = [utType(for: format)]
+        let base = (panel.nameFieldStringValue as NSString).deletingPathExtension
+        panel.nameFieldStringValue = "\(base).\(format.fileExtension)"
+    }
+
+    private func utType(for format: TableFileFormat) -> UTType {
+        switch format {
+        case .csv: return .commaSeparatedText
+        case .tsv: return UTType(filenameExtension: "tsv") ?? .tabSeparatedText
+        case .json: return .json
+        case .jsonl: return UTType(filenameExtension: "jsonl") ?? .text
+        case .xlsx: return UTType(filenameExtension: "xlsx") ?? .data
+        case .parquet: return UTType(filenameExtension: "parquet") ?? .data
         }
     }
 

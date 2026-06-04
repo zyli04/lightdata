@@ -56,6 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activeWindowController()?.saveDocument()
     }
 
+    @objc func saveDocumentAs(_ sender: Any?) {
+        activeWindowController()?.saveDocumentAs()
+    }
+
     @objc func newTab(_ sender: Any?) {
         let baseWindow = activeWindowController()?.window ?? windowControllers.first?.window
         let controller = makeWindowController(tabbedTo: baseWindow)
@@ -191,8 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let saveItem = NSMenuItem(title: "Save", action: #selector(saveDocument(_:)), keyEquivalent: "s")
         saveItem.target = self
         fileMenu.addItem(saveItem)
-        fileMenu.addItem(NSMenuItem(title: "Save As...", action: nil, keyEquivalent: "S"))
-        fileMenu.addItem(NSMenuItem(title: "Export...", action: nil, keyEquivalent: "e"))
+        let saveAsItem = NSMenuItem(title: "Save As...", action: #selector(saveDocumentAs(_:)), keyEquivalent: "S")
+        saveAsItem.target = self
+        fileMenu.addItem(saveAsItem)
         fileMenu.addItem(.separator())
         fileMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
         fileItem.submenu = fileMenu
