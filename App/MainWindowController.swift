@@ -788,6 +788,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var appearanceObservation: NSKeyValueObservation?
     private weak var saveAsPanel: NSSavePanel?
     private var saveAsFormats: [TableFileFormat] = []
+    private var searchDebounceWorkItem: DispatchWorkItem?
+    private let searchDebounceInterval: TimeInterval = 0.2
 
     convenience init() {
         let window = NSWindow(
@@ -823,6 +825,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             metadata = ViewMetadataStore.load(for: url)
             schema = metadata.schemaEnabled ? SchemaMetadataStore.load(for: url, headers: loaded.headers, rows: loaded.rows) : TableSchema()
             activeFilter = nil
+            searchDebounceWorkItem?.cancel()
             searchField.stringValue = ""
             filterValueField.stringValue = ""
             buildColumns()
@@ -1249,7 +1252,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func controlTextDidChange(_ obj: Notification) {
         if obj.object as? NSSearchField === searchField {
-            rebuildVisibleRows()
+            // Debounce: a full-table scan per keystroke is costly on large files.
+            // Coalesce rapid typing into one rebuild once the user pauses.
+            searchDebounceWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.rebuildVisibleRows()
+            }
+            searchDebounceWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + searchDebounceInterval, execute: workItem)
         }
     }
 
