@@ -26,6 +26,21 @@ public enum TableFileFormat: Equatable {
         default: nil
         }
     }
+
+    public var fileExtension: String {
+        switch self {
+        case .csv: "csv"
+        case .tsv: "tsv"
+        case .json: "json"
+        case .jsonl: "jsonl"
+        case .xlsx: "xlsx"
+        case .parquet: "parquet"
+        }
+    }
+
+    /// Formats LightData can write to via "Save As". XLSX/Parquet writing is not
+    /// supported yet, so they are intentionally excluded.
+    public static let writableFormats: [TableFileFormat] = [.csv, .tsv, .json, .jsonl]
 }
 
 public enum DelimiterKind: Codable, Equatable {
@@ -299,6 +314,29 @@ public struct TableDocument {
         }
         dirty = false
         loadedModificationDate = Self.modificationDate(for: url)
+    }
+
+    /// Writes the current table contents to a new location/format without mutating
+    /// this document. Used by "Save As". The caller is expected to reload the written
+    /// file to obtain a fresh document pointed at the new URL.
+    ///
+    /// Designed as the single export entry point so it can later be backed by a
+    /// streaming DuckDB `COPY` for very large datasets instead of the in-memory rows.
+    public func write(to targetURL: URL, as targetFormat: TableFileFormat) throws {
+        let encoding = openInfo.encoding ?? .utf8
+        let lineEnding = openInfo.lineEnding ?? .lf
+        switch targetFormat {
+        case .csv:
+            try DelimitedTextParser.write(url: targetURL, headers: headers, rows: rows, delimiter: ",", encoding: encoding, lineEnding: lineEnding)
+        case .tsv:
+            try DelimitedTextParser.write(url: targetURL, headers: headers, rows: rows, delimiter: "\t", encoding: encoding, lineEnding: lineEnding)
+        case .json:
+            try JSONTableParser.writeJSON(url: targetURL, headers: headers, rows: rows, encoding: encoding, lineEnding: lineEnding)
+        case .jsonl:
+            try JSONTableParser.writeJSONLines(url: targetURL, headers: headers, rows: rows, encoding: encoding, lineEnding: lineEnding)
+        case .xlsx, .parquet:
+            throw TableDocumentError.saveUnsupported("Exporting to \(targetFormat.displayName) is not supported yet.")
+        }
     }
 
     private func ensureFileWasNotChangedExternally() throws {
