@@ -198,6 +198,17 @@ public struct TableDocument {
         dirty = true
     }
 
+    /// Re-inserts rows at the given document indices (ascending), restoring the
+    /// positions captured before a deletion. Used by undo.
+    public mutating func insertRows(_ rowsByIndex: [Int: [String]]) {
+        guard !readOnly else { return }
+        for index in rowsByIndex.keys.sorted() {
+            let clamped = min(max(index, 0), rows.count)
+            rows.insert(rowsByIndex[index] ?? [], at: clamped)
+        }
+        dirty = true
+    }
+
     public mutating func moveRows(_ indexes: IndexSet, to target: Int) {
         guard !readOnly else { return }
         let sorted = indexes.sorted().filter { rows.indices.contains($0) }

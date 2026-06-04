@@ -747,6 +747,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var schema = TableSchema()
     private var editLocked = true
     private var documentColumnOrderDirty = false
+    private let documentUndoManager = UndoManager()
 
     private let rootView = DropView()
     private let tableView = DataTableView()
@@ -815,6 +816,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             tableDocument = loaded
             editLocked = true
             documentColumnOrderDirty = false
+            documentUndoManager.removeAllActions()
             metadata = ViewMetadataStore.load(for: url)
             schema = metadata.schemaEnabled ? SchemaMetadataStore.load(for: url, headers: loaded.headers, rows: loaded.rows) : TableSchema()
             activeFilter = nil
@@ -1078,17 +1080,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         guard canReorderRows() else { return }
         let sorted = selectionRange.rows.sorted()
         guard !sorted.isEmpty else { return }
-        let removedBefore = sorted.filter { $0 < index }.count
-        let insertAt = index - removedBefore
-        tableDocument?.moveRows(IndexSet(sorted), to: index)
-        rebuildVisibleRows()
-        let count = sorted.count
-        let newStart = min(max(insertAt, 0), max(0, visibleRows.count - count))
-        if visibleRows.indices.contains(newStart) {
-            selectRowRange(from: newStart, to: min(newStart + count - 1, visibleRows.count - 1))
+        // This is called from inside the drag's manual nextEvent loop; registering undo
+        // there corrupts UndoManager's per-event grouping. Defer to a clean run-loop turn.
+        DispatchQueue.main.async { [weak self] in
+            self?.performUndoableMoveRows(IndexSet(sorted), to: index, actionName: "Move Rows")
         }
-        updateStatus()
-        updateToolbarState()
     }
 
     func beginTextSelection(in cell: DataTextCellView, anchorEvent: NSEvent, firstDragEvent: NSEvent) {
@@ -1191,6 +1187,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     func windowWillClose(_ notification: Notification) {
         saveCurrentMetadata()
         onClose?(self)
+    }
+
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        documentUndoManager
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -1478,24 +1478,176 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateToolbarState()
     }
 
-    @objc func addRowClicked(_ sender: Any?) {
-        guard isEditingEnabled else { return }
-        let selectedDocumentRows = selectedDocumentRowIndexes()
-        let insertionRow = selectedDocumentRows.max()
-        tableDocument?.addRow(after: insertionRow)
-        rebuildVisibleRows()
+    // MARK: - Undoable edits (strategy B: incremental inverse, memory-light)
+
+    private func reloadEditedDocumentRow(_ documentRow: Int) {
+        if let visibleRow = visibleRows.firstIndex(of: documentRow) {
+            tableView.reloadData(
+                forRowIndexes: IndexSet(integer: visibleRow),
+                columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns)
+            )
+            refreshVisibleSelectionAppearance()
+        } else {
+            tableView.reloadData()
+        }
         updateStatus()
         updateToolbarState()
+    }
+
+    private func performUndoableCellValue(_ value: String, documentRow: Int, column: Int, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly,
+              doc.rows.indices.contains(documentRow),
+              doc.headers.indices.contains(column) else { return }
+        let current = column < doc.rows[documentRow].count ? doc.rows[documentRow][column] : ""
+        guard current != value else { return }
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableCellValue(current, documentRow: documentRow, column: column, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        tableDocument?.setValue(value, row: documentRow, column: column)
+        reloadEditedDocumentRow(documentRow)
+    }
+
+    private func performUndoableInsertRows(_ rowsByIndex: [Int: [String]], actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly, !rowsByIndex.isEmpty else { return }
+        let indices = rowsByIndex.keys.sorted()
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableDeleteRows(IndexSet(indices), actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        tableDocument?.insertRows(rowsByIndex)
+        rebuildVisibleRows()
+        updateToolbarState()
+    }
+
+    private func performUndoableDeleteRows(_ indices: IndexSet, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        let valid = indices.filter { doc.rows.indices.contains($0) }
+        guard !valid.isEmpty else { return }
+        var captured: [Int: [String]] = [:]
+        for index in valid { captured[index] = doc.rows[index] }
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableInsertRows(captured, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        tableDocument?.deleteRows(IndexSet(valid))
+        rebuildVisibleRows()
+        updateToolbarState()
+    }
+
+    private func performUndoableMoveRows(_ indices: IndexSet, to target: Int, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        let sorted = indices.sorted().filter { doc.rows.indices.contains($0) }
+        guard !sorted.isEmpty else { return }
+        let count = sorted.count
+        let removedBefore = sorted.filter { $0 < target }.count
+        let landedStart = min(max(target - removedBefore, 0), max(0, doc.rows.count - count))
+        // Inverse: move the landed contiguous block back to its original start.
+        // moveRows interprets `target` in the pre-removal index space, so the offset is
+        // asymmetric: when the inverse moves the block DOWN (original start below where it
+        // landed) we must add `count`; when it moves UP, the start index is used as-is.
+        let inverseIndices = IndexSet(integersIn: landedStart..<(landedStart + count))
+        let inverseFinalStart = sorted.first ?? 0
+        let inverseTarget = inverseFinalStart > landedStart ? inverseFinalStart + count : inverseFinalStart
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableMoveRows(inverseIndices, to: inverseTarget, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        tableDocument?.moveRows(IndexSet(sorted), to: target)
+        rebuildVisibleRows()
+        if visibleRows.indices.contains(landedStart) {
+            selectRowRange(from: landedStart, to: min(landedStart + count - 1, visibleRows.count - 1))
+        }
+        updateToolbarState()
+    }
+
+    private func performUndoablePaste(_ pastedRows: [[String]], startRow: Int, startColumn: Int, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly, !pastedRows.isEmpty else { return }
+        let oldRowCount = doc.rows.count
+        let endRow = startRow + pastedRows.count - 1
+        // Capture old contents of rows the paste will overwrite (existing ones only).
+        var captured: [Int: [String]] = [:]
+        for index in startRow...endRow where index < oldRowCount {
+            captured[index] = doc.rows[index]
+        }
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoablePasteRestore(captured, removeRowsFrom: oldRowCount, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        tableDocument?.pasteRows(pastedRows, startingAt: startRow, column: startColumn)
+        rebuildVisibleRows()
+        updateToolbarState()
+    }
+
+    private func performUndoablePasteRestore(_ oldRows: [Int: [String]], removeRowsFrom oldRowCount: Int, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        // Redo info: snapshot what we're about to overwrite/remove so redo re-applies.
+        let currentCount = doc.rows.count
+        var redoCaptured: [Int: [String]] = [:]
+        for index in oldRows.keys where index < currentCount {
+            redoCaptured[index] = doc.rows[index]
+        }
+        let appended = Array((max(oldRowCount, 0))..<currentCount).filter { $0 < currentCount }
+        let redoAppendedRows = appended.map { doc.rows[$0] }
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoablePasteReapply(redoCaptured, appendedRows: redoAppendedRows, fromIndex: oldRowCount, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        // Remove appended rows, then restore overwritten ones.
+        if currentCount > oldRowCount {
+            tableDocument?.deleteRows(IndexSet(integersIn: oldRowCount..<currentCount))
+        }
+        for (index, row) in oldRows {
+            for column in row.indices {
+                tableDocument?.setValue(row[column], row: index, column: column)
+            }
+        }
+        rebuildVisibleRows()
+        updateToolbarState()
+    }
+
+    private func performUndoablePasteReapply(_ overwritten: [Int: [String]], appendedRows: [[String]], fromIndex: Int, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        var redoOld: [Int: [String]] = [:]
+        for index in overwritten.keys where index < doc.rows.count {
+            redoOld[index] = doc.rows[index]
+        }
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoablePasteRestore(redoOld, removeRowsFrom: fromIndex, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        for (index, row) in overwritten {
+            for column in row.indices {
+                tableDocument?.setValue(row[column], row: index, column: column)
+            }
+        }
+        if !appendedRows.isEmpty {
+            var byIndex: [Int: [String]] = [:]
+            for (offset, row) in appendedRows.enumerated() { byIndex[fromIndex + offset] = row }
+            tableDocument?.insertRows(byIndex)
+        }
+        rebuildVisibleRows()
+        updateToolbarState()
+    }
+
+    @objc func addRowClicked(_ sender: Any?) {
+        guard isEditingEnabled, let doc = tableDocument else { return }
+        let insertionRow = selectedDocumentRowIndexes().max()
+        let insertedIndex: Int
+        if let insertionRow, doc.rows.indices.contains(insertionRow) {
+            insertedIndex = insertionRow + 1
+        } else {
+            insertedIndex = doc.rows.count
+        }
+        let emptyRow = Array(repeating: "", count: doc.headers.count)
+        performUndoableInsertRows([insertedIndex: emptyRow], actionName: "Add Row")
     }
 
     @objc func deleteRowsClicked(_ sender: Any?) {
         guard isEditingEnabled, selectionMode == .rows else { return }
         let selectedRows = selectedDocumentRowIndexes()
         guard !selectedRows.isEmpty else { return }
-        tableDocument?.deleteRows(selectedRows)
-        rebuildVisibleRows()
-        updateStatus()
-        updateToolbarState()
+        performUndoableDeleteRows(selectedRows, actionName: "Delete Rows")
     }
 
     @objc func renameColumnClicked(_ sender: Any?) {
@@ -1571,9 +1723,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let pastedRows = DelimitedTextParser.parse(text, delimiter: "\t")
         guard !pastedRows.isEmpty else { return }
 
-        tableDocument?.pasteRows(pastedRows, startingAt: startRow, column: startColumn)
-        rebuildVisibleRows()
-        updateStatus()
+        performUndoablePaste(pastedRows, startRow: startRow, startColumn: startColumn, actionName: "Paste")
     }
 
     @objc private func checkboxClicked(_ sender: DataCellButton) {
@@ -1584,16 +1734,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
         let columnSchema = schema.schema(for: tableDocument.headers[sender.columnIndex])
         let nextValue = boolValue(sender.rawValue, schema: columnSchema) ? "false" : "true"
-        self.tableDocument?.setValue(nextValue, row: sender.documentRow, column: sender.columnIndex)
-        tableView.reloadData()
-        updateStatus()
+        performUndoableCellValue(nextValue, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Toggle Checkbox")
     }
 
     @objc private func popupChanged(_ sender: DataCellPopupButton) {
         guard isEditingEnabled else { return }
         let value = sender.titleOfSelectedItem ?? ""
-        tableDocument?.setValue(value, row: sender.documentRow, column: sender.columnIndex)
-        updateStatus()
+        performUndoableCellValue(value, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Set Value")
     }
 
     @objc private func multiSelectClicked(_ sender: DataCellButton) {
@@ -1614,15 +1761,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         alert.addButton(withTitle: "Cancel")
 
         if alert.runModal() == .alertFirstButtonReturn {
-            tableDocument.setValue(input.stringValue, row: sender.documentRow, column: sender.columnIndex)
-            self.tableDocument = tableDocument
-            let values = tableDocument.rows.compactMap { row in
+            performUndoableCellValue(input.stringValue, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Edit Multi-select")
+            let values = (self.tableDocument?.rows ?? []).compactMap { row in
                 sender.columnIndex < row.count ? row[sender.columnIndex] : nil
             }
             schema.setType(.multiSelect, for: header, sampleValues: values)
             saveCurrentSchema()
             tableView.reloadData()
-            updateStatus()
         }
     }
 
@@ -2631,23 +2776,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         guard editor.commitsChanges else { return }
         let rawValue = rawValueForEditedText(newValue, columnIndex: source.columnIndex, rawValue: source.rawValue)
         guard rawValue != source.rawValue else { return }
-        tableDocument?.setValue(rawValue, row: source.documentRow, column: source.columnIndex)
-        source.rawValue = rawValue
-        if let tableDocument,
-           tableDocument.headers.indices.contains(source.columnIndex) {
-            let columnSchema = metadata.schemaEnabled ? schema.schema(for: tableDocument.headers[source.columnIndex]) : ColumnSchema(type: .text)
-            source.displayString = displayValue(rawValue, schema: columnSchema)
-        } else {
-            source.displayString = rawValue
-        }
-        if let visibleRow = visibleRows.firstIndex(of: source.documentRow) {
-            tableView.reloadData(
-                forRowIndexes: IndexSet(integer: visibleRow),
-                columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns)
-            )
-            refreshVisibleSelectionAppearance()
-        }
-        updateStatus()
+        performUndoableCellValue(rawValue, documentRow: source.documentRow, column: source.columnIndex, actionName: "Edit Cell")
     }
 
     private func cancelActiveCellEditor() {
