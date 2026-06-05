@@ -157,6 +157,21 @@ public struct TableDocument {
     public var columnCount: Int { headers.count }
     public var canEditFormat: Bool { !readOnly }
 
+    /// Builds a header-only, read-only document for the lazy/paged path: row data is
+    /// served on demand by a `DuckDBTableSource` rather than held in `rows`. Reuses the
+    /// same model so UI code can keep reading url/format/headers/openInfo uniformly.
+    public static func lazyHeaderOnly(url: URL, format: TableFileFormat, headers: [String], readOnlyReason: String) -> TableDocument {
+        TableDocument(
+            url: url,
+            format: format,
+            headers: headers,
+            rows: [],
+            readOnly: true,
+            openInfo: FileOpenInfo(encoding: nil, lineEnding: nil, delimiter: .none, readOnlyReason: readOnlyReason),
+            loadedModificationDate: modificationDate(for: url)
+        )
+    }
+
     public static func load(url: URL, delimiterOverride: Character? = nil) throws -> TableDocument {
         let ext = url.pathExtension.lowercased()
         switch ext {

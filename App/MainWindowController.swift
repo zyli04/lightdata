@@ -790,6 +790,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var saveAsFormats: [TableFileFormat] = []
     private var searchDebounceWorkItem: DispatchWorkItem?
     private let searchDebounceInterval: TimeInterval = 0.2
+    /// Non-nil when the current document is served lazily (paged) from DuckDB
+    /// instead of fully loaded into `tableDocument.rows`. Read-only.
+    private var lazyController: LazyTableController?
+    private var isLazy: Bool { lazyController != nil }
 
     convenience init() {
         let window = NSWindow(
@@ -817,7 +821,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             removeActiveTextSelectionView()
             removeActiveCellEditor(commit: true)
             saveCurrentMetadata()
-            let loaded = try TableDocument.load(url: url)
+            tearDownLazyController()
+            let loaded: TableDocument
+            if url.pathExtension.lowercased() == "parquet" || url.pathExtension.lowercased() == "pq" {
+                loaded = try openLazyParquet(url: url)
+            } else {
+                loaded = try TableDocument.load(url: url)
+            }
             tableDocument = loaded
             editLocked = true
             documentColumnOrderDirty = false
@@ -836,9 +846,98 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             updateToolbarState()
             window?.title = url.lastPathComponent
             window?.representedURL = url
+            if isLazy {
+                DispatchQueue.main.async { [weak self] in self?.updateLazyViewport() }
+            }
         } catch {
             showError(error)
         }
+    }
+
+    /// Sets up the lazy/paged DuckDB controller for a Parquet file and returns a
+    /// header-only document to drive the rest of the UI.
+    private func openLazyParquet(url: URL) throws -> TableDocument {
+        let source = try DuckDBTableSource(parquetURL: url)
+        let controller = LazyTableController(source: source)
+        controller.onRowCountChanged = { [weak self] _ in
+            guard let self else { return }
+            self.tableView.reloadData()
+            self.updateStatus()
+            self.updateLazyViewport()
+        }
+        controller.onRowsLoaded = { [weak self] rows in
+            guard let self else { return }
+            let columns = IndexSet(integersIn: 0..<self.tableView.numberOfColumns)
+            self.tableView.reloadData(forRowIndexes: rows, columnIndexes: columns)
+        }
+        lazyController = controller
+        controller.start()
+        return TableDocument.lazyHeaderOnly(url: url, format: .parquet, headers: source.headers, readOnlyReason: "Parquet read-only")
+    }
+
+    private func tearDownLazyController() {
+        lazyController = nil
+    }
+
+    /// Reports the currently visible block (rows × data columns) to the lazy
+    /// controller so it fetches exactly what's on screen, as one coherent unit.
+    private func updateLazyViewport() {
+        guard let lazyController else { return }
+        let rect = tableView.visibleRect
+        let rowRange = tableView.rows(in: rect)
+        let rows: Range<Int>
+        if rowRange.length > 0 {
+            rows = rowRange.location..<(rowRange.location + rowRange.length)
+        } else {
+            rows = 0..<min(lazyController.rowCount, 1)
+        }
+
+        let visibleColumns = tableView.columnIndexes(in: rect)
+        var dataColumns: [Int] = []
+        for visibleColumn in visibleColumns where tableView.tableColumns.indices.contains(visibleColumn) {
+            if let index = Int(tableView.tableColumns[visibleColumn].identifier.rawValue) {
+                dataColumns.append(index)
+            }
+        }
+        lazyController.updateViewport(rows: rows, columns: dataColumns)
+    }
+
+    // MARK: - Mode-aware display access
+
+    /// Number of rows the table view should show (filtered result count in lazy mode).
+    private var displayRowCount: Int {
+        isLazy ? (lazyController?.rowCount ?? 0) : visibleRows.count
+    }
+
+    /// Maps a visible row to its document row. In lazy mode rows map to themselves
+    /// (DuckDB already returns the filtered/sorted result), without materialising an array.
+    private func documentRow(forVisible visibleRow: Int) -> Int? {
+        if isLazy {
+            return (0..<displayRowCount).contains(visibleRow) ? visibleRow : nil
+        }
+        return visibleRows.indices.contains(visibleRow) ? visibleRows[visibleRow] : nil
+    }
+
+    /// Display string for a cell, regardless of backing. In lazy mode a not-yet-loaded
+    /// page returns a placeholder while the page is fetched in the background.
+    private func cellString(visibleRow: Int, columnIndex: Int) -> String {
+        if isLazy {
+            return lazyController?.value(row: visibleRow, column: columnIndex) ?? "…"
+        }
+        guard let tableDocument,
+              let documentRow = documentRow(forVisible: visibleRow),
+              tableDocument.rows.indices.contains(documentRow) else { return "" }
+        let row = tableDocument.rows[documentRow]
+        return columnIndex < row.count ? row[columnIndex] : ""
+    }
+
+    /// Builds a query spec from the current search/filter/sort UI state for lazy mode.
+    private func currentQuerySpec() -> TableQuerySpec {
+        // Lazy Parquet is browse-only: search, filter, and sort each require a
+        // full-table scan/sort across every column, which on wide many-row files
+        // balloons memory and randomly freezes the UI. So the spec stays identity
+        // and the fast file_row_number paging path is always used.
+        return TableQuerySpec()
     }
 
     func saveDocument() {
@@ -946,13 +1045,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        visibleRows.count
+        displayRowCount
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let tableColumn,
               let tableDocument,
-              visibleRows.indices.contains(row) else {
+              let documentRow = documentRow(forVisible: row) else {
             return nil
         }
         let visibleColumn = tableView.tableColumns.firstIndex { $0 === tableColumn } ?? -1
@@ -960,7 +1059,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         if tableColumn.identifier.rawValue == "rowNumber" {
             let id = NSUserInterfaceItemIdentifier("RowNumberCell")
             let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeCellView(identifier: id)
-            cell.textField?.stringValue = String(visibleRows[row] + 1)
+            cell.textField?.stringValue = String(documentRow + 1)
             cell.textField?.isEditable = false
             cell.textField?.isSelectable = false
             cell.textField?.alignment = .center
@@ -969,7 +1068,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 textField.mouseHandler = self
                 textField.visibleRow = row
                 textField.columnIndex = -1
-                textField.documentRow = visibleRows[row]
+                textField.documentRow = documentRow
                 textField.rawValue = cell.textField?.stringValue ?? ""
             }
             applySelectionStyle(to: cell, visibleRow: row, visibleColumn: visibleColumn)
@@ -980,9 +1079,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             return nil
         }
 
-        let documentRow = visibleRows[row]
-        let value = columnIndex < tableDocument.rows[documentRow].count ? tableDocument.rows[documentRow][columnIndex] : ""
-        let columnSchema = metadata.schemaEnabled ? schema.schema(for: tableDocument.headers[columnIndex]) : ColumnSchema(type: .text)
+        let value = cellString(visibleRow: row, columnIndex: columnIndex)
+        // Lazy (Parquet) rows are plain read-only text; schema cell types apply only
+        // to the in-memory editable path.
+        let columnSchema = (!isLazy && metadata.schemaEnabled) ? schema.schema(for: tableDocument.headers[columnIndex]) : ColumnSchema(type: .text)
 
         switch columnSchema.type {
         case .checkbox:
@@ -1052,7 +1152,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
 
         guard let visibleColumn = visibleColumn(forDataColumn: columnIndex),
-              visibleRows.indices.contains(visibleRow) else {
+              (0..<displayRowCount).contains(visibleRow) else {
             return false
         }
         let alreadySelectedCell = singleSelectedCell.map { $0 == (visibleRow, visibleColumn) } ?? false
@@ -1068,15 +1168,15 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     func selectCellRange(from start: (row: Int, column: Int), to end: (row: Int, column: Int)) {
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: true)
-        guard visibleRows.indices.contains(start.row),
-              visibleRows.indices.contains(end.row),
+        guard (0..<displayRowCount).contains(start.row),
+              (0..<displayRowCount).contains(end.row),
               isDataVisibleColumn(start.column),
               isDataVisibleColumn(end.column) else {
             return
         }
         selectionMode = .cells
         selectionRange = TableSelectionRange(mode: .cells, rows: indexSet(from: start.row, to: end.row), columns: indexSet(from: start.column, to: end.column))
-        tableView.selectRowIndexes(selectionRange.rows, byExtendingSelection: false)
+        applyNativeRowSelection(selectionRange.rows)
         window?.makeFirstResponder(tableView)
         refreshVisibleSelectionAppearance()
         updateToolbarState()
@@ -1085,16 +1185,36 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     func selectRowRange(from startRow: Int, to endRow: Int) {
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: true)
-        guard visibleRows.indices.contains(startRow),
-              visibleRows.indices.contains(endRow) else {
+        guard (0..<displayRowCount).contains(startRow),
+              (0..<displayRowCount).contains(endRow) else {
             return
         }
         selectionMode = .rows
         selectionRange = TableSelectionRange(mode: .rows, rows: indexSet(from: startRow, to: endRow), columns: dataVisibleColumnIndexes())
-        tableView.selectRowIndexes(selectionRange.rows, byExtendingSelection: false)
+        applyNativeRowSelection(selectionRange.rows)
         window?.makeFirstResponder(tableView)
         refreshVisibleSelectionAppearance()
         updateToolbarState()
+    }
+
+    /// Applies native NSTableView row selection. In lazy mode a column/all selection
+    /// can span millions of rows; pushing them all into NSTableView's native selection
+    /// is O(rows) and freezes the main thread. We draw selection ourselves from
+    /// `selectionRange`, so natively we only need the visible window.
+    private func applyNativeRowSelection(_ rows: IndexSet) {
+        guard isLazy, rows.count > 10_000 else {
+            tableView.selectRowIndexes(rows, byExtendingSelection: false)
+            return
+        }
+        let visible = tableView.rows(in: tableView.visibleRect)
+        let clamped: IndexSet
+        if visible.length > 0 {
+            let upper = min(visible.location + visible.length, tableView.numberOfRows)
+            clamped = IndexSet(integersIn: visible.location..<upper)
+        } else {
+            clamped = IndexSet()
+        }
+        tableView.selectRowIndexes(clamped, byExtendingSelection: false)
     }
 
     func selectColumnRange(from startColumn: Int, to endColumn: Int) {
@@ -1105,13 +1225,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             return
         }
         selectionMode = .columns
-        let selectedRows = visibleRows.isEmpty ? IndexSet() : IndexSet(integersIn: 0..<visibleRows.count)
+        let selectedRows = displayRowCount == 0 ? IndexSet() : IndexSet(integersIn: 0..<displayRowCount)
         selectionRange = TableSelectionRange(mode: .columns, rows: selectedRows, columns: indexSet(from: startColumn, to: endColumn))
-        if visibleRows.isEmpty {
-            tableView.selectRowIndexes(IndexSet(), byExtendingSelection: false)
-        } else {
-            tableView.selectRowIndexes(selectedRows, byExtendingSelection: false)
-        }
+        applyNativeRowSelection(displayRowCount == 0 ? IndexSet() : selectedRows)
         setContextColumnFromVisibleColumn(startColumn)
         window?.makeFirstResponder(tableView)
         refreshVisibleSelectionAppearance()
@@ -1121,16 +1237,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     func selectAllCells() {
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: true)
-        guard !visibleRows.isEmpty else { return }
+        guard displayRowCount > 0 else { return }
         let dataColumns = dataVisibleColumnIndexes()
         guard !dataColumns.isEmpty else { return }
         selectionMode = .all
         selectionRange = TableSelectionRange(
             mode: .all,
-            rows: IndexSet(integersIn: 0..<visibleRows.count),
+            rows: IndexSet(integersIn: 0..<displayRowCount),
             columns: dataColumns
         )
-        tableView.selectRowIndexes(selectionRange.rows, byExtendingSelection: false)
+        applyNativeRowSelection(selectionRange.rows)
         window?.makeFirstResponder(tableView)
         refreshVisibleSelectionAppearance()
         updateToolbarState()
@@ -1196,7 +1312,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func moveSelectedCell(rowDelta: Int, columnDelta: Int) {
         endActiveCellTextInteraction(commit: true)
-        guard !visibleRows.isEmpty else { return }
+        guard displayRowCount > 0 else { return }
         let dataColumns = (0..<tableView.numberOfColumns).filter { isDataVisibleColumn($0) }
         guard let firstDataColumn = dataColumns.first else { return }
 
@@ -1204,7 +1320,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let currentRow = current?.visibleRow ?? 0
         let currentColumn = current?.visibleColumn ?? firstDataColumn
 
-        let newRow = min(max(currentRow + rowDelta, 0), visibleRows.count - 1)
+        let newRow = min(max(currentRow + rowDelta, 0), displayRowCount - 1)
         var newColumn = currentColumn
         if columnDelta != 0 {
             if let index = dataColumns.firstIndex(of: currentColumn) {
@@ -1475,6 +1591,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func toggleSort(forVisibleColumn visibleColumn: Int) {
+        // Sorting a lazy Parquet re-sorts the whole table per page (huge cost/memory
+        // on wide files); disabled in lazy mode along with search/filter.
+        guard !isLazy else { return }
         guard isDataVisibleColumn(visibleColumn),
               let columnIndex = Int(tableView.tableColumns[visibleColumn].identifier.rawValue) else {
             return
@@ -1567,6 +1686,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     @objc func toggleFilterPanelClicked(_ sender: Any?) {
+        guard !isLazy else { return }
         filterPanelVisible.toggle()
         filterBar?.isHidden = !filterPanelVisible
         updateToolbarState()
@@ -1926,6 +2046,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     @objc private func applyFilterClicked(_ sender: Any?) {
+        guard !isLazy else { return }
         guard let tableDocument, columnPopup.indexOfSelectedItem >= 0 else { return }
         let columnIndex = columnPopup.indexOfSelectedItem
         let operation = FilterOperator.allCases[operatorPopup.indexOfSelectedItem]
@@ -2099,6 +2220,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         selectionOverlayView.frame = scrollView.contentView.bounds
         selectionOverlayView.needsDisplay = true
         updateActiveCellEditorFrame()
+        if isLazy { updateLazyViewport() }
     }
 
     private func configureStatusBadge() {
@@ -2478,12 +2600,18 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func rebuildVisibleRows() {
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: true)
-        visibleRows = TableQueryEngine.visibleRows(
-            in: tableDocument,
-            search: searchField.stringValue,
-            filter: activeFilter,
-            sortDescriptor: tableView.sortDescriptors.first
-        )
+        if isLazy {
+            // DuckDB does the filtering/sorting; just push the query and let paging refill.
+            lazyController?.setQuery(currentQuerySpec())
+            visibleRows = []
+        } else {
+            visibleRows = TableQueryEngine.visibleRows(
+                in: tableDocument,
+                search: searchField.stringValue,
+                filter: activeFilter,
+                sortDescriptor: tableView.sortDescriptors.first
+            )
+        }
         selectionRange = TableSelectionRange()
         selectionMode = .cells
         tableView.reloadData()
@@ -2502,7 +2630,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         fileLabel.stringValue = tableDocument.url.lastPathComponent
         let dirty = tableDocument.dirty ? " *" : ""
-        statusLabel.stringValue = "\(visibleRows.count)/\(tableDocument.rowCount) rows · \(tableDocument.columnCount) cols\(dirty)"
+        if isLazy {
+            statusLabel.stringValue = "\(displayRowCount) rows · \(tableDocument.columnCount) cols"
+        } else {
+            statusLabel.stringValue = "\(visibleRows.count)/\(tableDocument.rowCount) rows · \(tableDocument.columnCount) cols\(dirty)"
+        }
         statusBadge.isHidden = false
         saveButton.isEnabled = tableDocument.canEditFormat && tableDocument.dirty
     }
@@ -2519,7 +2651,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
               selectionRange.columns.count == 1,
               let row = selectionRange.rows.first,
               let column = selectionRange.columns.first,
-              visibleRows.indices.contains(row),
+              (0..<displayRowCount).contains(row),
               isDataVisibleColumn(column) else {
             return nil
         }
@@ -2568,6 +2700,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         setEnabled(isEditingEnabled, on: addRowItem)
         setEnabled(isEditingEnabled && selectionMode == .rows && !selectionRange.rows.isEmpty, on: deleteRowItem)
         setEnabled(tableDocument != nil, on: typeModeItem)
+        // Search and filter trigger full-table scans that are pathological on lazy
+        // Parquet (wide, many-row); disable those controls in that mode.
+        let searchFilterAvailable = tableDocument != nil && !isLazy
+        searchField.isEnabled = searchFilterAvailable
+        searchField.placeholderString = isLazy ? "Search unavailable for Parquet" : "Search all columns"
+        setEnabled(searchFilterAvailable, on: filterItem)
         let typeLabel = metadata.schemaEnabled ? "Types On" : "Types Off"
         if typeModeItem?.label != typeLabel {
             typeModeItem?.label = typeLabel
@@ -2592,8 +2730,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func selectedDocumentRowIndexes() -> IndexSet {
         var indexes = IndexSet()
-        for visibleIndex in tableView.selectedRowIndexes where visibleRows.indices.contains(visibleIndex) {
-            indexes.insert(visibleRows[visibleIndex])
+        for visibleIndex in tableView.selectedRowIndexes {
+            if let documentRow = documentRow(forVisible: visibleIndex) {
+                indexes.insert(documentRow)
+            }
         }
         return indexes
     }
@@ -2905,10 +3045,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         guard !dataColumns.isEmpty else { return "" }
         return selectedRows.compactMap { visibleRow -> String? in
-            guard visibleRows.indices.contains(visibleRow) else { return nil }
-            let documentRow = visibleRows[visibleRow]
+            guard documentRow(forVisible: visibleRow) != nil else { return nil }
             return dataColumns.map { columnIndex in
-                columnIndex < tableDocument.rows[documentRow].count ? tableDocument.rows[documentRow][columnIndex] : ""
+                cellString(visibleRow: visibleRow, columnIndex: columnIndex)
             }.joined(separator: "\t")
         }.joined(separator: "\n")
     }
