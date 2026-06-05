@@ -32,12 +32,13 @@ final class LazyTableControllerTests: XCTestCase {
         wait(for: [countExpectation], timeout: 5)
         XCTAssertEqual(controller.rowCount, 100)
 
-        // First access is a miss (nil) and schedules a fetch.
+        // Initially a miss (nil); reporting the viewport schedules a coherent fetch.
         XCTAssertNil(controller.value(row: 25, column: 0))
-        let loadExpectation = expectation(description: "page loaded")
+        let loadExpectation = expectation(description: "block loaded")
         controller.onRowsLoaded = { rows in
             if rows.contains(25) { loadExpectation.fulfill() }
         }
+        controller.updateViewport(rows: 20..<30, columns: [0, 1])
         wait(for: [loadExpectation], timeout: 5)
 
         // After load it's a synchronous hit with the right value.

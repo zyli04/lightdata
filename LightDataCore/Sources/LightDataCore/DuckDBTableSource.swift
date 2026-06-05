@@ -47,9 +47,23 @@ public final class DuckDBTableSource {
             // queries; otherwise parallel scans can return rows in varying order
             // and pagination becomes inconsistent.
             _ = try connection.query("SET preserve_insertion_order=true")
+            // Cap worker threads low: by default DuckDB uses every core, and a heavy
+            // scan (e.g. a deep page on a single-row-group file) then saturates the CPU
+            // and starves the main thread, randomly freezing the UI (beach ball) for
+            // the query's duration. Consistent latency is fine; unpredictable UI
+            // freezes are not — so keep most cores free for the UI even if queries run
+            // a bit slower.
+            // Keep most cores free for the UI so background scans don't starve it.
+            let cores = ProcessInfo.processInfo.activeProcessorCount
+            _ = try connection.query("SET threads=\(max(1, cores / 4))")
 
-            let relation = "read_parquet(\(Self.sqlStringLiteral(url.path)))"
-            let schemaResult = try connection.query("SELECT * FROM \(relation) LIMIT 0")
+            // file_row_number exposes each row's position in the file (0-based,
+            // contiguous). DuckDB pushes a range predicate on it into the Parquet
+            // reader and skips row groups via metadata, so paging by row-number
+            // range is ~O(1) at any depth — unlike LIMIT/OFFSET which rescans from
+            // the start. The schema probe must NOT request it (it's not a data column).
+            let relation = "read_parquet(\(Self.sqlStringLiteral(url.path)), file_row_number=true)"
+            let schemaResult = try connection.query("SELECT * FROM read_parquet(\(Self.sqlStringLiteral(url.path))) LIMIT 0")
             let rawNames = (0..<schemaResult.columnCount).map { schemaResult.columnName(at: $0) }
             let unique = makeUnique(rawNames)
             guard !unique.isEmpty else { throw TableDocumentError.emptyFile }
@@ -62,7 +76,7 @@ public final class DuckDBTableSource {
             self.headers = unique
             self.database = database
             self.connection = connection
-            self.baseSubquery = "(SELECT \(innerSelect) FROM \(relation)) AS t"
+            self.baseSubquery = "(SELECT \(innerSelect), file_row_number AS \(Self.rowNumberAlias) FROM \(relation)) AS t"
         } catch let error as TableDocumentError {
             throw error
         } catch {
@@ -85,20 +99,51 @@ public final class DuckDBTableSource {
         return Int(column[0] ?? "0") ?? 0
     }
 
-    /// Fetches a page of rows (as display strings; NULL becomes "") for the given
-    /// query, ordered consistently so pages stitch together correctly.
-    public func page(matching spec: TableQuerySpec, offset: Int, limit: Int) throws -> [[String]] {
-        guard limit > 0 else { return [] }
-        let selectList = (0..<headers.count).map { Self.varcharRef($0) }.joined(separator: ", ")
-        let sql = "SELECT \(selectList) FROM \(baseSubquery)"
-            + whereClause(for: spec)
-            + orderClause(for: spec)
-            + " LIMIT \(limit) OFFSET \(max(0, offset))"
+    /// Fetches only the requested columns for a page of rows (as display strings;
+    /// NULL becomes ""). Fetching just the visible columns is essential for wide
+    /// tables: each extra column means decompressing another column chunk, which on
+    /// a single-row-group file costs ~hundreds of ms.
+    ///
+    /// Returns a map of column index -> values, plus the number of rows actually
+    /// returned (the last page may be short).
+    public func columns(_ columnIndexes: [Int], matching spec: TableQuerySpec, offset: Int, limit: Int) throws -> (data: [Int: [String]], rowCount: Int) {
+        let wanted = columnIndexes.filter { headers.indices.contains($0) }
+        guard limit > 0, !wanted.isEmpty else { return ([:], 0) }
+        let start = max(0, offset)
+        let selectList = wanted.map { Self.varcharRef($0) }.joined(separator: ", ")
+        let sql: String
+        if spec.isIdentity {
+            // Fast path: range scan on the pushed-down file row number. On files with
+            // many small row groups this is constant-time at any depth; on a single
+            // huge row group it still must scan, but only over the wanted columns.
+            sql = "SELECT \(selectList) FROM \(baseSubquery)"
+                + " WHERE \(Self.rowNumberAlias) >= \(start) AND \(Self.rowNumberAlias) < \(start + limit)"
+                + " ORDER BY \(Self.rowNumberAlias)"
+        } else {
+            // Filtered/sorted views can't use the row-number range; fall back to
+            // LIMIT/OFFSET (deep pages here are slower).
+            sql = "SELECT \(selectList) FROM \(baseSubquery)"
+                + whereClause(for: spec)
+                + orderClause(for: spec)
+                + " LIMIT \(limit) OFFSET \(start)"
+        }
         let result = try connection.query(sql)
-        let columns = (0..<result.columnCount).map { result[$0].cast(to: String.self) }
         let rows = Int(result.rowCount)
+        var data: [Int: [String]] = [:]
+        for (position, columnIndex) in wanted.enumerated() {
+            let column = result[DBInt(position)].cast(to: String.self)
+            data[columnIndex] = (0..<rows).map { column[DBInt($0)] ?? "" }
+        }
+        return (data, rows)
+    }
+
+    /// Convenience: fetches a full page of all columns as row-major strings.
+    public func page(matching spec: TableQuerySpec, offset: Int, limit: Int) throws -> [[String]] {
+        let all = Array(0..<headers.count)
+        let (data, rows) = try columns(all, matching: spec, offset: offset, limit: limit)
+        guard rows > 0 else { return [] }
         return (0..<rows).map { rowIndex in
-            columns.map { $0[DBInt(rowIndex)] ?? "" }
+            all.map { data[$0]?[rowIndex] ?? "" }
         }
     }
 
@@ -138,6 +183,8 @@ public final class DuckDBTableSource {
     }
 
     // MARK: - SQL helpers
+
+    private static let rowNumberAlias = "\"__frn\""
 
     private static func columnAlias(_ index: Int) -> String { "\"c\(index)\"" }
 
