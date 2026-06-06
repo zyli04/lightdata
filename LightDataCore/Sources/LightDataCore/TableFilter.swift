@@ -63,6 +63,11 @@ public enum TableQueryEngine {
             indexes.sort { left, right in
                 let lhs = value(at: columnIndex, row: document.rows[left])
                 let rhs = value(at: columnIndex, row: document.rows[right])
+                // Empty cells always sink to the bottom, regardless of sort direction.
+                let lhsEmpty = lhs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let rhsEmpty = rhs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if lhsEmpty != rhsEmpty { return rhsEmpty }
+                if lhsEmpty && rhsEmpty { return false }
                 let result = compare(lhs, rhs)
                 return sortDescriptor.ascending ? result == .orderedAscending : result == .orderedDescending
             }

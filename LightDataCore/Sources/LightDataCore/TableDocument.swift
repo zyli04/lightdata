@@ -172,6 +172,30 @@ public struct TableDocument {
         )
     }
 
+    /// Default columns/rows for a freshly created blank document.
+    public static let blankHeaders = ["Column 1", "Column 2", "Column 3"]
+    public static let blankRowCount = 3
+
+    /// Creates a new, empty editable file on disk in the given format (CSV/TSV/JSON/
+    /// JSONL only), seeded with default columns and a few empty rows. The caller then
+    /// opens the file normally to edit it.
+    public static func createBlank(at url: URL, format: TableFileFormat) throws {
+        let headers = blankHeaders
+        let rows = Array(repeating: Array(repeating: "", count: headers.count), count: blankRowCount)
+        switch format {
+        case .csv:
+            try DelimitedTextParser.write(url: url, headers: headers, rows: rows, delimiter: ",", encoding: .utf8, lineEnding: .lf)
+        case .tsv:
+            try DelimitedTextParser.write(url: url, headers: headers, rows: rows, delimiter: "\t", encoding: .utf8, lineEnding: .lf)
+        case .json:
+            try JSONTableParser.writeJSON(url: url, headers: headers, rows: rows, encoding: .utf8, lineEnding: .lf)
+        case .jsonl:
+            try JSONTableParser.writeJSONLines(url: url, headers: headers, rows: rows, encoding: .utf8, lineEnding: .lf)
+        case .xlsx, .parquet:
+            throw TableDocumentError.saveUnsupported("Cannot create a new \(format.displayName) file.")
+        }
+    }
+
     public static func load(url: URL, delimiterOverride: Character? = nil) throws -> TableDocument {
         let ext = url.pathExtension.lowercased()
         switch ext {
