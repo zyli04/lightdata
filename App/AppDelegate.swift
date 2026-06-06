@@ -1,9 +1,12 @@
 import AppKit
 import LightDataCore
+import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowControllers: [MainWindowController] = []
     private var pendingOpenURLs: [URL] = []
+    private weak var newFilePanel: NSSavePanel?
+    private var newFileFormats: [TableFileFormat] = []
     private var didFinishLaunching = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -18,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if urls.isEmpty {
             showWindow()
         } else {
-            urls.forEach(open(url:))
+            urls.forEach { self.open(url: $0) }
         }
     }
 
@@ -26,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !didFinishLaunching {
             pendingOpenURLs.append(contentsOf: urls)
         } else {
-            urls.forEach(open(url:))
+            urls.forEach { self.open(url: $0) }
         }
     }
 
@@ -48,7 +51,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         if panel.runModal() == .OK {
-            panel.urls.forEach(open(url:))
+            panel.urls.forEach { self.open(url: $0) }
+        }
+    }
+
+    @objc func newFile(_ sender: Any?) {
+        let formats = TableFileFormat.writableFormats
+        let popup = NSPopUpButton(frame: NSRect(x: 80, y: 11, width: 220, height: 25))
+        for format in formats {
+            popup.addItem(withTitle: "\(format.displayName) (.\(format.fileExtension))")
+        }
+        popup.selectItem(at: 0)
+        popup.target = self
+        popup.action = #selector(newFileFormatChanged(_:))
+
+        let label = NSTextField(labelWithString: "Format:")
+        label.frame = NSRect(x: 16, y: 14, width: 60, height: 22)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 50))
+        accessory.addSubview(label)
+        accessory.addSubview(popup)
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.title = "New File"
+        panel.accessoryView = accessory
+        panel.allowedContentTypes = [utType(for: formats[0])]
+        panel.nameFieldStringValue = "Untitled.\(formats[0].fileExtension)"
+        newFilePanel = panel
+        newFileFormats = formats
+
+        let result = panel.runModal()
+        newFilePanel = nil
+        guard result == .OK, var url = panel.url else { return }
+        let format = formats[popup.indexOfSelectedItem]
+        if url.pathExtension.lowercased() != format.fileExtension {
+            url.deletePathExtension()
+            url.appendPathExtension(format.fileExtension)
+        }
+        do {
+            try TableDocument.createBlank(at: url, format: format)
+            let controller = open(url: url)
+            // CSV/TSV readers drop all-empty rows, so a freshly created file may open
+            // with no rows; seed empty rows in memory so it's immediately editable.
+            controller.seedBlankRowsForNewFile()
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    @objc private func newFileFormatChanged(_ sender: NSPopUpButton) {
+        guard let panel = newFilePanel,
+              newFileFormats.indices.contains(sender.indexOfSelectedItem) else { return }
+        let format = newFileFormats[sender.indexOfSelectedItem]
+        panel.allowedContentTypes = [utType(for: format)]
+        let base = (panel.nameFieldStringValue as NSString).deletingPathExtension
+        panel.nameFieldStringValue = "\(base).\(format.fileExtension)"
+    }
+
+    private func utType(for format: TableFileFormat) -> UTType {
+        switch format {
+        case .csv: return .commaSeparatedText
+        case .tsv: return UTType(filenameExtension: "tsv") ?? .tabSeparatedText
+        case .json: return .json
+        case .jsonl: return UTType(filenameExtension: "jsonl") ?? .text
+        case .xlsx: return UTType(filenameExtension: "xlsx") ?? .data
+        case .parquet: return UTType(filenameExtension: "parquet") ?? .data
         }
     }
 
@@ -85,7 +153,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         open(url: url)
     }
 
-    private func open(url: URL) {
+    @discardableResult
+    private func open(url: URL) -> MainWindowController {
         let controller: MainWindowController
         if let emptyController = reusableEmptyWindowController() {
             controller = emptyController
@@ -98,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.open(url: url)
         controller.window?.makeKeyAndOrderFront(nil)
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        return controller
     }
 
     private func showWindow() {
@@ -180,6 +250,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
+        let newFileItem = NSMenuItem(title: "New File...", action: #selector(newFile(_:)), keyEquivalent: "n")
+        newFileItem.target = self
+        fileMenu.addItem(newFileItem)
         let newTabItem = NSMenuItem(title: "New Tab", action: #selector(newWindowForTab(_:)), keyEquivalent: "t")
         newTabItem.target = self
         fileMenu.addItem(newTabItem)

@@ -233,6 +233,7 @@ protocol DataTableSelectionHandling: AnyObject {
     func editSelectedCell(initialText: String?)
     func moveSelectedCell(rowDelta: Int, columnDelta: Int)
     func endActiveCellTextInteraction(commit: Bool)
+    func clearSelection()
     func canReorderRows() -> Bool
     func showRowDropIndicator(atVisibleIndex index: Int)
     func hideRowDropIndicator()
@@ -405,7 +406,10 @@ final class DataTableView: NSTableView {
         let row = self.row(at: point)
         let column = self.column(at: point)
         guard row >= 0, column >= 0 else {
+            // Click in the empty area (below rows / right of the last column) clears
+            // the current selection.
             selectionHandler?.endActiveCellTextInteraction(commit: true)
+            selectionHandler?.clearSelection()
             window?.makeFirstResponder(self)
             super.mouseDown(with: event)
             return
@@ -429,6 +433,20 @@ final class DataTableView: NSTableView {
             }
             trackDataCellMouseDown(event, start: (row, column))
         }
+    }
+
+    // NSTableView draws vertical grid lines between columns but not on the trailing
+    // edge of the last column; add it so the rightmost column has the same divider.
+    override func drawGrid(inClipRect clipRect: NSRect) {
+        super.drawGrid(inClipRect: clipRect)
+        guard numberOfColumns > 0 else { return }
+        let x = rect(ofColumn: numberOfColumns - 1).maxX
+        gridColor.setStroke()
+        let line = NSBezierPath()
+        line.lineWidth = 1
+        line.move(to: NSPoint(x: x - 0.5, y: clipRect.minY))
+        line.line(to: NSPoint(x: x - 0.5, y: clipRect.maxY))
+        line.stroke()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -672,6 +690,11 @@ final class DataTableHeaderView: NSTableHeaderView {
         }
 
         columnActionHandler?.clearSortForHeaderSelection()
+        // Tint the column (header + body) immediately on press so it doesn't flash the
+        // native gray pressed state and the body highlight follows the header right
+        // away. This avoids first-responder / reload, so it won't cancel the native
+        // column drag-reorder tracking that super.mouseDown runs.
+        columnActionHandler?.previewColumnSelection(column)
         // Let NSTableHeaderView run its native click + column drag-reorder tracking
         // first (it blocks until mouse-up). Doing our own selection / first-responder
         // work before this previously cancelled the drag. Sync selection afterwards,
@@ -680,6 +703,11 @@ final class DataTableHeaderView: NSTableHeaderView {
         super.mouseDown(with: event)
         if let draggedColumn, let newIndex = tableView?.tableColumns.firstIndex(of: draggedColumn) {
             selectionHandler?.selectColumnRange(from: newIndex, to: newIndex)
+            // One drag = one undo step: the column ended at newIndex after starting at
+            // `column`, so register an undo that moves it back (which itself registers redo).
+            if newIndex != column {
+                columnActionHandler?.registerColumnDragUndo(originalIndex: column, newIndex: newIndex)
+            }
         }
     }
 
@@ -786,6 +814,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private weak var activeCellEditorSource: DataTextCellView?
     private var didBuildInterface = false
     private var appearanceObservation: NSKeyValueObservation?
+    private var titlebarClickMonitor: Any?
     private weak var saveAsPanel: NSSavePanel?
     private var saveAsFormats: [TableFileFormat] = []
     private var searchDebounceWorkItem: DispatchWorkItem?
@@ -814,6 +843,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     override func windowDidLoad() {
         super.windowDidLoad()
         configureWindow()
+    }
+
+    deinit {
+        if let titlebarClickMonitor {
+            NSEvent.removeMonitor(titlebarClickMonitor)
+        }
     }
 
     func open(url: URL) {
@@ -940,9 +975,38 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return TableQuerySpec()
     }
 
+    /// After creating a new file, ensure it shows a few empty rows for editing even if
+    /// the on-disk file round-tripped to zero rows (delimited readers drop empty rows).
+    /// Treated as clean (not dirty) since the file was just created.
+    func seedBlankRowsForNewFile() {
+        guard var doc = tableDocument, !doc.readOnly else { return }
+        let target = TableDocument.blankRowCount
+        guard doc.rows.count < target else { return }
+        while doc.rows.count < target {
+            doc.rows.append(Array(repeating: "", count: doc.headers.count))
+        }
+        doc.dirty = false
+        tableDocument = doc
+        rebuildVisibleRows()
+        updateStatus()
+    }
+
+    /// Bakes the active sort into the row order so Save persists it (edit mode only).
+    /// Sorts ALL rows by the descriptor — filter/search are view-only and never drop
+    /// rows from the saved file.
+    private func bakeActiveSortIfNeeded(into doc: inout TableDocument) {
+        guard isEditingEnabled, !doc.readOnly,
+              let descriptor = tableView.sortDescriptors.first,
+              descriptor.key != nil else { return }
+        let order = TableQueryEngine.visibleRows(in: doc, search: "", filter: nil, sortDescriptor: descriptor)
+        guard order.count == doc.rows.count, order != Array(doc.rows.indices) else { return }
+        doc.rows = order.map { doc.rows[$0] }
+    }
+
     func saveDocument() {
         guard var current = tableDocument else { return }
         do {
+            bakeActiveSortIfNeeded(into: &current)
             if documentColumnOrderDirty,
                let order = currentVisibleDataColumnOrder(in: current),
                order != Array(current.headers.indices) {
@@ -954,6 +1018,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             metadata.columnOrder = current.headers
             buildColumns()
             refreshFilterControls()
+            rebuildVisibleRows()
             saveCurrentMetadata()
             saveCurrentSchema()
             updateStatus()
@@ -1109,6 +1174,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         rebuildVisibleRows()
+        // In edit mode an active sort will be baked into the file on save, so mark the
+        // document dirty to enable Save. (Read-only sort is view-only, never saved.)
+        if isEditingEnabled, !tableView.sortDescriptors.isEmpty {
+            tableDocument?.dirty = true
+            updateStatus()
+            updateToolbarState()
+        }
     }
 
     func tableViewColumnDidResize(_ notification: Notification) {
@@ -1121,15 +1193,42 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         captureMetadata()
         if isEditingEnabled,
            let current = tableDocument,
-           let order = currentVisibleDataColumnOrder(in: current),
-           order != Array(current.headers.indices) {
-            documentColumnOrderDirty = true
-            tableDocument?.dirty = true
+           let order = currentVisibleDataColumnOrder(in: current) {
+            documentColumnOrderDirty = (order != Array(current.headers.indices))
+            if documentColumnOrderDirty {
+                tableDocument?.dirty = true
+            }
         }
         refreshVisibleSelectionAppearance()
         updateHeaderSortState()
         updateStatus()
         updateToolbarState()
+    }
+
+    /// Registers undo for a completed column drag (column went `originalIndex` →
+    /// `newIndex`). Undo moves it back; that move re-registers the redo, so the whole
+    /// drag is a single ⌘Z — consistent with row reordering.
+    func registerColumnDragUndo(originalIndex: Int, newIndex: Int) {
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performColumnMove(from: newIndex, to: originalIndex)
+        }
+        documentUndoManager.setActionName("Move Column")
+    }
+
+    private func performColumnMove(from: Int, to: Int) {
+        guard tableView.tableColumns.indices.contains(from),
+              tableView.tableColumns.indices.contains(to) else { return }
+        removeActiveCellEditor(commit: true)
+        // Visual move; tableViewColumnDidMove updates the dirty/order state. Saving
+        // later applies the order to the file (same as a manual drag).
+        tableView.moveColumn(from, toColumn: to)
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performColumnMove(from: to, to: from)
+        }
+        documentUndoManager.setActionName("Move Column")
+        if isDataVisibleColumn(to) {
+            selectColumnRange(from: to, to: to)
+        }
     }
 
     func tableView(_ tableView: NSTableView, shouldReorderColumn columnIndex: Int, toColumn newColumnIndex: Int) -> Bool {
@@ -1230,6 +1329,29 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         applyNativeRowSelection(displayRowCount == 0 ? IndexSet() : selectedRows)
         setContextColumnFromVisibleColumn(startColumn)
         window?.makeFirstResponder(tableView)
+        refreshVisibleSelectionAppearance()
+        updateToolbarState()
+    }
+
+    /// Immediately tints the pressed column (header + body) on mouse-down, without
+    /// touching first responder or reloading, so it's safe to call before
+    /// NSTableHeaderView's native drag tracking (which would otherwise be cancelled).
+    /// The full selection (first responder etc.) is finalized after the drag.
+    func previewColumnSelection(_ visibleColumn: Int) {
+        guard isDataVisibleColumn(visibleColumn) else { return }
+        selectionMode = .columns
+        let rows = displayRowCount == 0 ? IndexSet() : IndexSet(integersIn: 0..<displayRowCount)
+        selectionRange = TableSelectionRange(mode: .columns, rows: rows, columns: indexSet(from: visibleColumn, to: visibleColumn))
+        refreshVisibleSelectionAppearance()
+    }
+
+    func clearSelection() {
+        removeActiveTextSelectionView()
+        removeActiveCellEditor(commit: true)
+        guard !selectionRange.isEmpty || selectionMode != .cells else { return }
+        selectionMode = .cells
+        selectionRange = TableSelectionRange()
+        tableView.selectRowIndexes(IndexSet(), byExtendingSelection: false)
         refreshVisibleSelectionAppearance()
         updateToolbarState()
     }
@@ -2184,6 +2306,15 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         window?.delegate = self
         appearanceObservation = window?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             self?.appearanceDidChange()
+        }
+        // Clicking the titlebar / toolbar background (above the content) clears the
+        // cell selection. Returns the event unconsumed so toolbar items still work.
+        titlebarClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self, let window = self.window, event.window === window else { return event }
+            if event.locationInWindow.y > window.contentLayoutRect.maxY {
+                self.clearSelection()
+            }
+            return event
         }
         configureToolbar()
         buildInterface()
