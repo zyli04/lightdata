@@ -15,7 +15,7 @@ enum XLSXReaderError: LocalizedError {
 }
 
 enum XLSXReader {
-    static func readFirstSheet(url: URL) throws -> ParsedTable {
+    static func readFirstSheet(url: URL, firstRowIsHeader: Bool = true) throws -> ParsedTable {
         let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("LightData-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -32,20 +32,25 @@ enum XLSXReader {
 
         let maxColumn = sheet.values.flatMap(\.keys).max() ?? 0
         let firstRowIndex = sheet.keys.min() ?? 1
-        let headerCells = sheet[firstRowIndex] ?? [:]
-        var headers = (0...maxColumn).map { index in
-            let value = headerCells[index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return value.isEmpty ? "Column \(index + 1)" : value
-        }
-        headers = makeUnique(headers)
-
-        let rows = sheet.keys
-            .sorted()
-            .filter { $0 != firstRowIndex }
-            .map { rowIndex in
-                let row = sheet[rowIndex] ?? [:]
-                return (0..<headers.count).map { row[$0] ?? "" }
+        let headers: [String]
+        let dataRowKeys: [Int]
+        if firstRowIsHeader {
+            let headerCells = sheet[firstRowIndex] ?? [:]
+            let names = (0...maxColumn).map { index in
+                let value = headerCells[index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return value.isEmpty ? "Column \(index + 1)" : value
             }
+            headers = makeUnique(names)
+            dataRowKeys = sheet.keys.sorted().filter { $0 != firstRowIndex }
+        } else {
+            headers = (0...maxColumn).map { "Column \($0 + 1)" }
+            dataRowKeys = sheet.keys.sorted()
+        }
+
+        let rows = dataRowKeys.map { rowIndex in
+            let row = sheet[rowIndex] ?? [:]
+            return (0..<headers.count).map { row[$0] ?? "" }
+        }
 
         return ParsedTable(
             headers: headers,

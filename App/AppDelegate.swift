@@ -311,6 +311,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let dataItem = NSMenuItem()
         let dataMenu = NSMenu(title: "Data")
+        dataMenu.addItem(NSMenuItem(title: "Use First Row as Header", action: Selector(("toggleFirstRowHeaderClicked:")), keyEquivalent: ""))
+        dataMenu.addItem(NSMenuItem(title: "Write Headers to File", action: Selector(("writeHeadersToFileClicked:")), keyEquivalent: ""))
+        dataMenu.addItem(.separator())
         dataMenu.addItem(NSMenuItem(title: "Reset View", action: Selector(("resetViewClicked:")), keyEquivalent: ""))
         dataMenu.addItem(.separator())
         dataMenu.addItem(NSMenuItem(title: "Clear Sort", action: Selector(("clearSortClicked:")), keyEquivalent: "0"))

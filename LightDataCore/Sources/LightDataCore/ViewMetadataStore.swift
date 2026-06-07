@@ -8,6 +8,12 @@ public struct ViewMetadata: Codable {
     /// Stored by name (not index) so it survives column reordering.
     public var sortColumnName: String?
     public var sortAscending: Bool = true
+    /// For delimited files only: remembered "first row is a header" choice
+    /// (nil = not set, use default true).
+    public var hasHeaderRow: Bool?
+    /// Custom column names typed for a headerless file (display-only overlay, not in
+    /// the data). Column-scale, so tiny.
+    public var headerlessColumnNames: [String]?
 
     public init() {}
 
@@ -18,6 +24,8 @@ public struct ViewMetadata: Codable {
         schemaEnabled = try container.decodeIfPresent(Bool.self, forKey: .schemaEnabled) ?? false
         sortColumnName = try container.decodeIfPresent(String.self, forKey: .sortColumnName)
         sortAscending = try container.decodeIfPresent(Bool.self, forKey: .sortAscending) ?? true
+        hasHeaderRow = try container.decodeIfPresent(Bool.self, forKey: .hasHeaderRow)
+        headerlessColumnNames = try container.decodeIfPresent([String].self, forKey: .headerlessColumnNames)
     }
 }
 
