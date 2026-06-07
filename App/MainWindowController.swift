@@ -2,6 +2,17 @@ import AppKit
 import LightDataCore
 import UniformTypeIdentifiers
 
+extension NSMenu {
+    /// Recursively finds the first menu item with the given action.
+    func findItem(withAction action: Selector) -> NSMenuItem? {
+        for item in items {
+            if item.action == action { return item }
+            if let found = item.submenu?.findItem(withAction: action) { return found }
+        }
+        return nil
+    }
+}
+
 protocol DataCellMouseHandling: AnyObject {
     func dataCellControlShouldHandleMouseDown(visibleRow: Int, columnIndex: Int, event: NSEvent) -> Bool
 }
@@ -862,17 +873,27 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             removeActiveCellEditor(commit: true)
             saveCurrentMetadata()
             tearDownLazyController()
-            let loaded: TableDocument
-            if url.pathExtension.lowercased() == "parquet" || url.pathExtension.lowercased() == "pq" {
+            // Load view memory first so the remembered "first row is header" choice can
+            // be applied at parse time.
+            let savedMetadata = ViewMetadataStore.load(for: url)
+            var loaded: TableDocument
+            let ext = url.pathExtension.lowercased()
+            if ext == "parquet" || ext == "pq" {
                 loaded = try openLazyParquet(url: url)
             } else {
-                loaded = try TableDocument.load(url: url)
+                loaded = try TableDocument.load(url: url, firstRowIsHeader: savedMetadata.hasHeaderRow ?? true)
+            }
+            // Headerless file with remembered custom column names: apply them (display only).
+            if !loaded.hasHeaderRow,
+               let names = savedMetadata.headerlessColumnNames,
+               names.count == loaded.headers.count {
+                loaded.headers = names
             }
             tableDocument = loaded
             editLocked = true
             documentColumnOrderDirty = false
             documentUndoManager.removeAllActions()
-            metadata = ViewMetadataStore.load(for: url)
+            metadata = savedMetadata
             schema = metadata.schemaEnabled ? SchemaMetadataStore.load(for: url, headers: loaded.headers, rows: loaded.rows) : TableSchema()
             activeFilter = nil
             searchDebounceWorkItem?.cancel()
@@ -1574,6 +1595,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             return type == .select || type == .multiSelect || type == .status
         case #selector(toggleEditModeClicked(_:)):
             return tableDocument?.canEditFormat == true
+        case #selector(toggleFirstRowHeaderClicked(_:)):
+            menuItem.state = (tableDocument?.hasHeaderRow == true) ? .on : .off
+            return supportsHeaderToggle
+        case #selector(writeHeadersToFileClicked(_:)):
+            return isDelimitedDocument && tableDocument?.readOnly == false && tableDocument?.hasHeaderRow == false
         default:
             return true
         }
@@ -2034,6 +2060,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 schema.columns.removeValue(forKey: oldHeader)
                 schema.columns[updatedHeader] = oldSchema
                 saveCurrentSchema()
+            }
+            // For a headerless file, the (display-only) names live in view memory, so
+            // persist the rename there since it isn't written to the data file.
+            if let doc = self.tableDocument, !doc.hasHeaderRow {
+                metadata.headerlessColumnNames = doc.headers
+                ViewMetadataStore.save(metadata, for: doc.url)
             }
             buildColumns()
             refreshFilterControls()
@@ -2845,6 +2877,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func updateToolbarState() {
+        updateHeaderMenuCheckmark()
         let canEditFormat = tableDocument?.canEditFormat == true
         setEnabled(canEditFormat, on: editModeItem)
         let editLabel = isEditingEnabled ? "Lock" : "Edit"
@@ -3266,6 +3299,72 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             NSSortDescriptor(key: String(columnIndex), ascending: metadata.sortAscending)
         ]
         suppressSortPersistence = false
+    }
+
+    /// Explicitly syncs the "Use First Row as Header" menu checkmark with the current
+    /// document (validateMenuItem state wasn't taking effect for this item).
+    private func updateHeaderMenuCheckmark() {
+        guard let item = NSApp.mainMenu?.findItem(withAction: Selector(("toggleFirstRowHeaderClicked:"))) else { return }
+        item.state = (supportsHeaderToggle && tableDocument?.hasHeaderRow == true) ? .on : .off
+    }
+
+    /// Delimited (CSV/TSV) — the formats whose header row can be written to disk.
+    private var isDelimitedDocument: Bool {
+        guard let format = tableDocument?.format else { return false }
+        return format == .csv || format == .tsv
+    }
+
+    /// Formats where "first row is header" is a meaningful choice: CSV/TSV (editable)
+    /// and XLSX (read-only → the toggle is view-only, never written).
+    private var supportsHeaderToggle: Bool {
+        guard let format = tableDocument?.format else { return false }
+        return format == .csv || format == .tsv || format == .xlsx
+    }
+
+    /// Toggles whether the file's first row is treated as a header. Off → synthesize
+    /// "Column N" and the former header values move into the data; On → the first data
+    /// row is promoted to the header. Remembered per file.
+    @objc func toggleFirstRowHeaderClicked(_ sender: Any?) {
+        guard var doc = tableDocument, supportsHeaderToggle else { return }
+        removeActiveCellEditor(commit: true)
+        if doc.hasHeaderRow {
+            // Turning OFF: synthesize placeholders; old header becomes first data row.
+            let count = doc.headers.count
+            let oldHeaders = doc.headers
+            doc.headers = (0..<count).map { "Column \($0 + 1)" }
+            doc.rows.insert(oldHeaders, at: 0)
+            doc.hasHeaderRow = false
+        } else {
+            // Turning ON: promote the first data row to the header.
+            guard !doc.rows.isEmpty else { return }
+            let promoted = doc.rows.removeFirst()
+            doc.headers = promoted.enumerated().map { index, value in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? "Column \(index + 1)" : trimmed
+            }
+            doc.hasHeaderRow = true
+        }
+        if !doc.readOnly { doc.dirty = true }   // read-only XLSX: view-only, never saved
+        tableDocument = doc
+        metadata.hasHeaderRow = doc.hasHeaderRow
+        metadata.headerlessColumnNames = doc.hasHeaderRow ? nil : doc.headers
+        documentColumnOrderDirty = false
+        buildColumns()
+        rebuildVisibleRows()
+        updateStatus()
+        updateToolbarState()
+        ViewMetadataStore.save(metadata, for: doc.url)
+    }
+
+    /// For a headerless file: commit the current column names as a real header row in
+    /// the data file (writes it to disk). The file becomes headered.
+    @objc func writeHeadersToFileClicked(_ sender: Any?) {
+        guard var doc = tableDocument, isDelimitedDocument, !doc.readOnly, !doc.hasHeaderRow else { return }
+        doc.hasHeaderRow = true
+        tableDocument = doc
+        metadata.hasHeaderRow = true
+        metadata.headerlessColumnNames = nil
+        saveDocument()   // writes header line + data to the file atomically
     }
 
     /// Wipes all view-layer arrangement (sort, column order, column widths) back to the

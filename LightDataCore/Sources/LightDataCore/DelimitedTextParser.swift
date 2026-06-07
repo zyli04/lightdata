@@ -1,27 +1,38 @@
 import Foundation
 
 public enum DelimitedTextParser {
-    static func readAuto(url: URL) throws -> ParsedTable {
+    static func readAuto(url: URL, firstRowIsHeader: Bool = true) throws -> ParsedTable {
         let decoded = try FileTextDecoder.decode(url: url)
         let delimiter = detectDelimiter(in: decoded.text)
-        return try table(from: parse(decoded.text, delimiter: delimiter), decoded: decoded, delimiter: delimiter)
+        return try table(from: parse(decoded.text, delimiter: delimiter), decoded: decoded, delimiter: delimiter, firstRowIsHeader: firstRowIsHeader)
     }
 
-    static func read(url: URL, delimiter: Character) throws -> ParsedTable {
+    static func read(url: URL, delimiter: Character, firstRowIsHeader: Bool = true) throws -> ParsedTable {
         let decoded = try FileTextDecoder.decode(url: url)
-        return try table(from: parse(decoded.text, delimiter: delimiter), decoded: decoded, delimiter: delimiter)
+        return try table(from: parse(decoded.text, delimiter: delimiter), decoded: decoded, delimiter: delimiter, firstRowIsHeader: firstRowIsHeader)
     }
 
-    private static func table(from records: [[String]], decoded: DecodedText, delimiter: Character) throws -> ParsedTable {
+    private static func table(from records: [[String]], decoded: DecodedText, delimiter: Character, firstRowIsHeader: Bool) throws -> ParsedTable {
         guard !records.isEmpty else { throw TableDocumentError.emptyFile }
 
-        var headers = records[0].map { uniqueHeaderName($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        if headers.allSatisfy({ $0.isEmpty }) {
-            headers = (0..<records[0].count).map { "Column \($0 + 1)" }
+        let headers: [String]
+        let dataRecords: ArraySlice<[String]>
+        if firstRowIsHeader {
+            var names = records[0].map { uniqueHeaderName($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if names.allSatisfy({ $0.isEmpty }) {
+                names = (0..<records[0].count).map { "Column \($0 + 1)" }
+            }
+            headers = makeUnique(names)
+            dataRecords = records.dropFirst()
+        } else {
+            // Headerless: every record is data; synthesize placeholder column names
+            // sized to the widest record so nothing is truncated.
+            let columnCount = records.map(\.count).max() ?? 0
+            headers = (0..<columnCount).map { "Column \($0 + 1)" }
+            dataRecords = records[...]
         }
-        headers = makeUnique(headers)
 
-        let rows = records.dropFirst().map { row in
+        let rows = dataRecords.map { row in
             normalized(row, width: headers.count)
         }
         return ParsedTable(
@@ -36,8 +47,9 @@ public enum DelimitedTextParser {
         )
     }
 
-    static func write(url: URL, headers: [String], rows: [[String]], delimiter: Character, encoding: TextEncodingKind, lineEnding: LineEnding) throws {
-        let allRows = [headers] + rows.map { normalized($0, width: headers.count) }
+    static func write(url: URL, headers: [String], rows: [[String]], delimiter: Character, encoding: TextEncodingKind, lineEnding: LineEnding, includeHeader: Bool = true) throws {
+        let dataRows = rows.map { normalized($0, width: headers.count) }
+        let allRows = includeHeader ? [headers] + dataRows : dataRows
         let output = allRows.map { record in
             record.map { escape($0, delimiter: delimiter) }.joined(separator: String(delimiter))
         }.joined(separator: lineEnding.stringValue) + lineEnding.stringValue

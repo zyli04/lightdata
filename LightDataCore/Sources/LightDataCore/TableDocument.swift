@@ -152,6 +152,10 @@ public struct TableDocument {
     public var sheetName: String?
     public var openInfo: FileOpenInfo
     public var loadedModificationDate: Date?
+    /// Whether the file has a real header row (read from / written to disk). When false
+    /// (headerless delimited file), the headers are synthetic placeholders and are NOT
+    /// written back on save. Always true for JSON/JSONL/XLSX/Parquet (intrinsic names).
+    public var hasHeaderRow: Bool = true
 
     public var rowCount: Int { rows.count }
     public var columnCount: Int { headers.count }
@@ -196,15 +200,19 @@ public struct TableDocument {
         }
     }
 
-    public static func load(url: URL, delimiterOverride: Character? = nil) throws -> TableDocument {
+    public static func load(url: URL, delimiterOverride: Character? = nil, firstRowIsHeader: Bool = true) throws -> TableDocument {
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "csv":
-            let table = try delimiterOverride.map { try DelimitedTextParser.read(url: url, delimiter: $0) } ?? DelimitedTextParser.readAuto(url: url)
-            return TableDocument(url: url, format: .csv, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            let table = try delimiterOverride.map { try DelimitedTextParser.read(url: url, delimiter: $0, firstRowIsHeader: firstRowIsHeader) } ?? DelimitedTextParser.readAuto(url: url, firstRowIsHeader: firstRowIsHeader)
+            var doc = TableDocument(url: url, format: .csv, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            doc.hasHeaderRow = firstRowIsHeader
+            return doc
         case "tsv", "tab":
-            let table = try DelimitedTextParser.read(url: url, delimiter: delimiterOverride ?? "\t")
-            return TableDocument(url: url, format: .tsv, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            let table = try DelimitedTextParser.read(url: url, delimiter: delimiterOverride ?? "\t", firstRowIsHeader: firstRowIsHeader)
+            var doc = TableDocument(url: url, format: .tsv, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            doc.hasHeaderRow = firstRowIsHeader
+            return doc
         case "json":
             let table = try JSONTableParser.readJSON(url: url)
             return TableDocument(url: url, format: .json, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
@@ -212,8 +220,10 @@ public struct TableDocument {
             let table = try JSONTableParser.readJSONLines(url: url)
             return TableDocument(url: url, format: .jsonl, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
         case "xlsx":
-            let table = try XLSXReader.readFirstSheet(url: url)
-            return TableDocument(url: url, format: .xlsx, headers: table.headers, rows: table.rows, readOnly: true, sheetName: table.sheetName, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            let table = try XLSXReader.readFirstSheet(url: url, firstRowIsHeader: firstRowIsHeader)
+            var doc = TableDocument(url: url, format: .xlsx, headers: table.headers, rows: table.rows, readOnly: true, sheetName: table.sheetName, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            doc.hasHeaderRow = firstRowIsHeader
+            return doc
         case "parquet", "pq":
             let table = try ParquetReader.read(url: url)
             return TableDocument(url: url, format: .parquet, headers: table.headers, rows: table.rows, readOnly: true, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
@@ -339,9 +349,9 @@ public struct TableDocument {
 
         switch format {
         case .csv:
-            try DelimitedTextParser.write(url: url, headers: headers, rows: rows, delimiter: openInfo.delimiter.character ?? ",", encoding: openInfo.encoding ?? .utf8, lineEnding: openInfo.lineEnding ?? .lf)
+            try DelimitedTextParser.write(url: url, headers: headers, rows: rows, delimiter: openInfo.delimiter.character ?? ",", encoding: openInfo.encoding ?? .utf8, lineEnding: openInfo.lineEnding ?? .lf, includeHeader: hasHeaderRow)
         case .tsv:
-            try DelimitedTextParser.write(url: url, headers: headers, rows: rows, delimiter: openInfo.delimiter.character ?? "\t", encoding: openInfo.encoding ?? .utf8, lineEnding: openInfo.lineEnding ?? .lf)
+            try DelimitedTextParser.write(url: url, headers: headers, rows: rows, delimiter: openInfo.delimiter.character ?? "\t", encoding: openInfo.encoding ?? .utf8, lineEnding: openInfo.lineEnding ?? .lf, includeHeader: hasHeaderRow)
         case .json:
             try JSONTableParser.writeJSON(url: url, headers: headers, rows: rows, encoding: openInfo.encoding ?? .utf8, lineEnding: openInfo.lineEnding ?? .lf)
         case .jsonl:
