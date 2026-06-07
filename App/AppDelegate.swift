@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didFinishLaunching = true
         NSWindow.allowsAutomaticWindowTabbing = true
         NSApp.activate(ignoringOtherApps: true)
+        MetadataLocation.pruneOrphans()
         buildMenu()
 
         let argvURLs = CommandLine.arguments.dropFirst().map(URL.init(fileURLWithPath:))
@@ -310,6 +311,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let dataItem = NSMenuItem()
         let dataMenu = NSMenu(title: "Data")
+        dataMenu.addItem(NSMenuItem(title: "Reset View", action: Selector(("resetViewClicked:")), keyEquivalent: ""))
+        dataMenu.addItem(.separator())
         dataMenu.addItem(NSMenuItem(title: "Clear Sort", action: Selector(("clearSortClicked:")), keyEquivalent: "0"))
         dataMenu.addItem(NSMenuItem(title: "Clear Filter", action: Selector(("clearFilterClicked:")), keyEquivalent: "k"))
         dataMenu.addItem(NSMenuItem(title: "Reload File", action: Selector(("reloadFileClicked:")), keyEquivalent: "r"))

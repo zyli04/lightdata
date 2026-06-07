@@ -4,6 +4,10 @@ public struct ViewMetadata: Codable {
     public var columnWidths: [String: Double] = [:]
     public var columnOrder: [String] = []
     public var schemaEnabled: Bool = false
+    /// Persisted sort: the column's header name and direction (nil = no sort).
+    /// Stored by name (not index) so it survives column reordering.
+    public var sortColumnName: String?
+    public var sortAscending: Bool = true
 
     public init() {}
 
@@ -12,6 +16,8 @@ public struct ViewMetadata: Codable {
         columnWidths = try container.decodeIfPresent([String: Double].self, forKey: .columnWidths) ?? [:]
         columnOrder = try container.decodeIfPresent([String].self, forKey: .columnOrder) ?? []
         schemaEnabled = try container.decodeIfPresent(Bool.self, forKey: .schemaEnabled) ?? false
+        sortColumnName = try container.decodeIfPresent(String.self, forKey: .sortColumnName)
+        sortAscending = try container.decodeIfPresent(Bool.self, forKey: .sortAscending) ?? true
     }
 }
 

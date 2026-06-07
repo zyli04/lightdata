@@ -777,6 +777,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var editLocked = true
     private var documentColumnOrderDirty = false
     private let documentUndoManager = UndoManager()
+    /// Set while programmatically restoring sort from metadata to avoid double-undo
+    /// registration or prematurely writing the restored sort back to metadata.
+    private var suppressSortPersistence = false
+    /// Debounces metadata writes during continuous column-width drags.
+    private var metadataPersistWorkItem: DispatchWorkItem?
 
     private let rootView = DropView()
     private let tableView = DataTableView()
@@ -874,6 +879,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             searchField.stringValue = ""
             filterValueField.stringValue = ""
             buildColumns()
+            restoreSortFromMetadata(for: loaded)
             refreshFilterControls()
             refreshDelimiterControl()
             rebuildVisibleRows()
@@ -1173,7 +1179,18 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        // Sort is a view operation; make it ⌘Z-undoable by restoring the previous
+        // descriptors. The restore re-fires this delegate, which registers the redo.
+        if !suppressSortPersistence, tableView.sortDescriptors != oldDescriptors {
+            documentUndoManager.registerUndo(withTarget: self) { target in
+                target.tableView.sortDescriptors = oldDescriptors
+            }
+            documentUndoManager.setActionName("Sort")
+        }
         rebuildVisibleRows()
+        if !suppressSortPersistence {
+            persistViewMetadata()
+        }
         // In edit mode an active sort will be baked into the file on save, so mark the
         // document dirty to enable Save. (Read-only sort is view-only, never saved.)
         if isEditingEnabled, !tableView.sortDescriptors.isEmpty {
@@ -1185,7 +1202,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func tableViewColumnDidResize(_ notification: Notification) {
         updateActiveCellEditorFrame()
+        // Live resize fires this many times per drag; debounce the disk write.
         captureMetadata()
+        metadataPersistWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.persistViewMetadata() }
+        metadataPersistWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     func tableViewColumnDidMove(_ notification: Notification) {
@@ -1203,6 +1225,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateHeaderSortState()
         updateStatus()
         updateToolbarState()
+        persistViewMetadata()
     }
 
     /// Registers undo for a completed column drag (column went `originalIndex` →
@@ -1234,8 +1257,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     func tableView(_ tableView: NSTableView, shouldReorderColumn columnIndex: Int, toColumn newColumnIndex: Int) -> Bool {
         // newColumnIndex == -1 is AppKit's initial "can this column be dragged at all"
         // query — must allow it or the drag never starts. Only forbid dropping at 0
-        // (the row-number column's slot).
-        isEditingEnabled && isDataVisibleColumn(columnIndex) && newColumnIndex != 0
+        // (the row-number column's slot). Column reorder is a view operation, so it
+        // works in both read-only and edit mode (edit-mode Save bakes it into the file).
+        isDataVisibleColumn(columnIndex) && newColumnIndex != 0
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -2261,6 +2285,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableView.allowsMultipleSelection = true
         tableView.selectionHandler = self
         tableView.style = .plain
+        // Keep every column at its set width; don't auto-stretch the last column to
+        // fill the view (which made the rightmost column look huge).
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
         tableView.gridStyleMask = [.solidHorizontalGridLineMask, .solidVerticalGridLineMask]
         tableView.intercellSpacing = NSSize(width: 0, height: 0)
         tableView.rowHeight = 28
@@ -2668,7 +2695,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             let type = metadata.schemaEnabled ? schema.schema(for: header).type : .text
             column.title = metadata.schemaEnabled ? "\(header)  \(type.displayName)" : header
             column.minWidth = 80
-            column.width = metadata.columnWidths[header] ?? max(120, min(260, CGFloat(header.count * 10 + 44)))
+            column.width = metadata.columnWidths[header] ?? 120
             let headerCell = SelectableHeaderCell(textCell: column.title)
             headerCell.alignment = .center
             column.headerCell = headerCell
@@ -3208,6 +3235,61 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func saveCurrentSchema() {
         guard let tableDocument else { return }
         SchemaMetadataStore.save(schema, for: tableDocument.url)
+    }
+
+    /// Writes the current sort into ViewMetadata (alongside column widths/order from
+    /// captureMetadata) and saves. Safe to call on every sort/column drag — cheap
+    /// since metadata is tiny.
+    private func persistViewMetadata() {
+        guard let tableDocument else { return }
+        captureMetadata()
+        if let descriptor = tableView.sortDescriptors.first,
+           let key = descriptor.key,
+           let columnIndex = Int(key),
+           tableDocument.headers.indices.contains(columnIndex) {
+            metadata.sortColumnName = tableDocument.headers[columnIndex]
+            metadata.sortAscending = descriptor.ascending
+        } else {
+            metadata.sortColumnName = nil
+        }
+        ViewMetadataStore.save(metadata, for: tableDocument.url)
+    }
+
+    /// Restores a persisted sort descriptor from the view metadata on file open.
+    /// Column name → column index (headers may differ if document changed, so we
+    /// look up by name; missing columns are silently ignored).
+    private func restoreSortFromMetadata(for document: TableDocument) {
+        guard let name = metadata.sortColumnName,
+              let columnIndex = document.headers.firstIndex(of: name) else { return }
+        suppressSortPersistence = true
+        tableView.sortDescriptors = [
+            NSSortDescriptor(key: String(columnIndex), ascending: metadata.sortAscending)
+        ]
+        suppressSortPersistence = false
+    }
+
+    /// Wipes all view-layer arrangement (sort, column order, column widths) back to the
+    /// raw data-driven defaults, and persists the cleared state. Works in both modes.
+    /// (Leaves column types / schema alone — that's a deliberate feature toggle.)
+    @objc func resetViewClicked(_ sender: Any?) {
+        guard let tableDocument else { return }
+        suppressSortPersistence = true
+        tableView.sortDescriptors = []
+        suppressSortPersistence = false
+        metadata.columnOrder = []
+        metadata.columnWidths = [:]
+        metadata.sortColumnName = nil
+        metadata.sortAscending = true
+        documentColumnOrderDirty = false
+        if isEditingEnabled { self.tableDocument?.dirty = false }
+        buildColumns()            // rebuilds at default width + original column order
+        rebuildVisibleRows()
+        updateHeaderSortState()
+        updateStatus()
+        updateToolbarState()
+        // Save the truly-empty arrangement directly (don't go through persistViewMetadata,
+        // which would recapture current widths/order from the rebuilt table).
+        ViewMetadataStore.save(metadata, for: tableDocument.url)
     }
 
     private func configure(textCell: DataTextCellView, value: String, schema: ColumnSchema) {

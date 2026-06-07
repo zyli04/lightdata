@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-enum MetadataLocation {
+public enum MetadataLocation {
     static func centralizedURL(for fileURL: URL, kind: String) -> URL {
         updateIndex(for: fileURL)
         return metadataDirectory()
@@ -10,6 +10,43 @@ enum MetadataLocation {
 
     static func ensureMetadataDirectory() throws {
         try FileManager.default.createDirectory(at: metadataDirectory(), withIntermediateDirectories: true)
+    }
+
+    /// Walk the index and remove entries whose source files no longer exist.
+    /// Call once on app launch — cheap (one stat per entry; index is tiny).
+    public static func pruneOrphans() {
+        var index = loadIndex()
+        let fm = FileManager.default
+        var removed = false
+        for (identity, record) in index.files {
+            let exists = fileExists(record: record)
+            if !exists {
+                try? fm.removeItem(at: metadataURL(identity: identity, kind: "views"))
+                try? fm.removeItem(at: metadataURL(identity: identity, kind: "schema"))
+                index.files.removeValue(forKey: identity)
+                removed = true
+            }
+        }
+        if removed { saveIndex(index) }
+    }
+
+    private static func fileExists(record: MetadataFileRecord) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: record.lastKnownPath) { return true }
+        if let b64 = record.bookmarkBase64,
+           let data = Data(base64Encoded: b64) {
+            var stale = false
+            if let resolved = try? URL(resolvingBookmarkData: data, options: .withoutUI,
+                                        bookmarkDataIsStale: &stale),
+               !stale, fm.fileExists(atPath: resolved.path) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func metadataURL(identity: String, kind: String) -> URL {
+        metadataDirectory().appendingPathComponent("\(identity).\(kind).json")
     }
 
     private static func updateIndex(for fileURL: URL) {
