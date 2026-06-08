@@ -836,6 +836,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var didBuildInterface = false
     private var appearanceObservation: NSKeyValueObservation?
     private var titlebarClickMonitor: Any?
+    private var fileWatchSource: DispatchSourceFileSystemObject?
+    private var fileWatchDescriptor: CInt = -1
+    private var isHandlingExternalChange = false
     private weak var saveAsPanel: NSSavePanel?
     private var saveAsFormats: [TableFileFormat] = []
     private var searchDebounceWorkItem: DispatchWorkItem?
@@ -870,6 +873,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         if let titlebarClickMonitor {
             NSEvent.removeMonitor(titlebarClickMonitor)
         }
+        stopWatchingFile()
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        checkForExternalChanges()
+    }
+
+    @objc private func appDidBecomeActive(_ notification: Notification) {
+        checkForExternalChanges()
     }
 
     func open(url: URL) {
@@ -913,6 +926,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             updateToolbarState()
             window?.title = url.lastPathComponent
             window?.representedURL = url
+            startWatchingFile(url)
             if isLazy {
                 DispatchQueue.main.async { [weak self] in self?.updateLazyViewport() }
             }
@@ -944,6 +958,86 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func tearDownLazyController() {
         lazyController = nil
+    }
+
+    // MARK: - External file change detection
+
+    /// Starts a live filesystem watch on the open file. Re-establishes the watch after
+    /// atomic saves (write-temp-then-rename, which most editors use) by re-watching the
+    /// path when the original fd reports rename/delete.
+    private func startWatchingFile(_ url: URL) {
+        stopWatchingFile()
+        let fd = Darwin.open(url.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .rename, .delete, .attrib],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            let flags = source.data
+            if flags.contains(.rename) || flags.contains(.delete) {
+                // The file was replaced/moved (atomic save); the fd is now stale.
+                self.stopWatchingFile()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    guard let self, let current = self.tableDocument?.url else { return }
+                    self.startWatchingFile(current)
+                    self.checkForExternalChanges()
+                }
+            } else {
+                self.checkForExternalChanges()
+            }
+        }
+        source.setCancelHandler { Darwin.close(fd) }
+        fileWatchSource = source
+        fileWatchDescriptor = fd
+        source.resume()
+    }
+
+    private func stopWatchingFile() {
+        fileWatchSource?.cancel()   // cancel handler closes the descriptor
+        fileWatchSource = nil
+        fileWatchDescriptor = -1
+    }
+
+    /// Compares the open file's on-disk modification date to the loaded one. If it
+    /// changed: reload automatically when there are no unsaved edits, otherwise prompt.
+    private func checkForExternalChanges() {
+        guard !isHandlingExternalChange, let doc = tableDocument else { return }
+        let url = doc.url
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path),
+              let diskDate = (try? fm.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date,
+              let loadedDate = doc.loadedModificationDate,
+              abs(diskDate.timeIntervalSince(loadedDate)) > 0.5 else { return }
+
+        if doc.dirty {
+            isHandlingExternalChange = true
+            let alert = NSAlert()
+            alert.messageText = "“\(url.lastPathComponent)” was changed by another program"
+            alert.informativeText = "You have unsaved changes. Reload from disk (discarding your changes), or keep your version?"
+            alert.addButton(withTitle: "Reload")
+            alert.addButton(withTitle: "Keep Mine")
+            let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+                guard let self else { return }
+                self.isHandlingExternalChange = false
+                if response == .alertFirstButtonReturn {
+                    self.open(url: url)
+                } else {
+                    // Keep mine: adopt the disk date so we stop prompting; a later Save
+                    // will overwrite the external change.
+                    self.tableDocument?.loadedModificationDate = diskDate
+                }
+            }
+            if let window {
+                alert.beginSheetModal(for: window, completionHandler: finish)
+            } else {
+                finish(alert.runModal())
+            }
+        } else {
+            open(url: url)   // reloads from disk, restoring view memory
+        }
     }
 
     /// Reports the currently visible block (rows × data columns) to the lazy
@@ -2381,6 +2475,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             }
             return event
         }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appDidBecomeActive(_:)),
+            name: NSApplication.didBecomeActiveNotification, object: nil
+        )
         configureToolbar()
         buildInterface()
         rebuildVisibleRows()
