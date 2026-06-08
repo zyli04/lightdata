@@ -297,8 +297,24 @@ final class SelectionOverlayView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard let tableView,
-              selectionRange.mode == .cells,
+        guard let tableView else { return }
+
+        // Trailing vertical grid line after the last column — drawn here (top-most
+        // overlay) so per-row backgrounds can't paint over it. Always shown.
+        if tableView.numberOfColumns > 0 {
+            let edgeX = tableView.rect(ofColumn: tableView.numberOfColumns - 1).maxX
+            let x = tableView.convert(NSPoint(x: edgeX, y: 0), to: self).x
+            if x >= bounds.minX, x <= bounds.maxX {
+                NSColor.gridColor.setStroke()
+                let line = NSBezierPath()
+                line.lineWidth = 1
+                line.move(to: NSPoint(x: x - 0.5, y: bounds.minY))
+                line.line(to: NSPoint(x: x - 0.5, y: bounds.maxY))
+                line.stroke()
+            }
+        }
+
+        guard selectionRange.mode == .cells,
               !selectionRange.isEmpty,
               let firstRow = selectionRange.rows.min(),
               let lastRow = selectionRange.rows.max(),
@@ -317,7 +333,7 @@ final class SelectionOverlayView: NSView {
         guard !tableRect.isNull, !tableRect.isEmpty else { return }
 
         let overlayRect = tableView.convert(tableRect, to: self).insetBy(dx: 1, dy: 1)
-        let path = NSBezierPath(roundedRect: overlayRect, xRadius: 2.5, yRadius: 2.5)
+        let path = NSBezierPath(rect: overlayRect)
         path.lineWidth = 2
         NSColor.controlAccentColor.setStroke()
         path.stroke()
@@ -448,17 +464,6 @@ final class DataTableView: NSTableView {
 
     // NSTableView draws vertical grid lines between columns but not on the trailing
     // edge of the last column; add it so the rightmost column has the same divider.
-    override func drawGrid(inClipRect clipRect: NSRect) {
-        super.drawGrid(inClipRect: clipRect)
-        guard numberOfColumns > 0 else { return }
-        let x = rect(ofColumn: numberOfColumns - 1).maxX
-        gridColor.setStroke()
-        let line = NSBezierPath()
-        line.lineWidth = 1
-        line.move(to: NSPoint(x: x - 0.5, y: clipRect.minY))
-        line.line(to: NSPoint(x: x - 0.5, y: clipRect.maxY))
-        line.stroke()
-    }
 
     override func keyDown(with event: NSEvent) {
         let modifierMask = event.modifierFlags.intersection([.command, .control, .option])
@@ -1223,6 +1228,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func tableViewColumnDidResize(_ notification: Notification) {
         updateActiveCellEditorFrame()
+        selectionOverlayView.needsDisplay = true   // trailing line position may change
         // Live resize fires this many times per drag; debounce the disk write.
         captureMetadata()
         metadataPersistWorkItem?.cancel()
@@ -2807,6 +2813,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableView.reloadData()
         updateHeaderSortState()
         updateStatus()
+        refreshVisibleSelectionAppearance()
     }
 
     private func updateStatus() {
@@ -3014,7 +3021,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func refreshVisibleSelectionAppearance() {
         selectionOverlayView.selectionRange = selectionRange
-        selectionOverlayView.isHidden = selectionRange.isEmpty
+        // Always visible: the overlay also draws the trailing grid line, not just the
+        // selection box (it's transparent where neither is present, and click-through).
+        selectionOverlayView.isHidden = tableDocument == nil
         selectionOverlayView.frame = scrollView.contentView.bounds
         selectionOverlayView.needsDisplay = true
         if let headerView = tableView.headerView as? DataTableHeaderView {
