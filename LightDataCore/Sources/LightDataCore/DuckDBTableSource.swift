@@ -90,9 +90,16 @@ public final class DuckDBTableSource {
         try rowCount(matching: TableQuerySpec())
     }
 
-    /// Number of rows matching the given query.
+    /// Number of rows matching the given query. For the unfiltered case the count is
+    /// read from the Parquet footer (instant, no scan) — critical on huge files where
+    /// count(*) over the projected/file_row_number subquery would scan the whole file.
     public func rowCount(matching spec: TableQuerySpec) throws -> Int {
-        let sql = "SELECT CAST(count(*) AS VARCHAR) FROM \(baseSubquery)\(whereClause(for: spec))"
+        let sql: String
+        if spec.isIdentity {
+            sql = "SELECT CAST(sum(num_rows) AS VARCHAR) FROM parquet_file_metadata(\(Self.sqlStringLiteral(url.path)))"
+        } else {
+            sql = "SELECT CAST(count(*) AS VARCHAR) FROM \(baseSubquery)\(whereClause(for: spec))"
+        }
         let result = try connection.query(sql)
         guard result.rowCount > 0 else { return 0 }
         let column = result[0].cast(to: String.self)

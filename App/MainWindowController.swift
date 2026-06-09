@@ -305,12 +305,17 @@ final class SelectionOverlayView: NSView {
             let edgeX = tableView.rect(ofColumn: tableView.numberOfColumns - 1).maxX
             let x = tableView.convert(NSPoint(x: edgeX, y: 0), to: self).x
             if x >= bounds.minX, x <= bounds.maxX {
-                NSColor.gridColor.setStroke()
                 let line = NSBezierPath()
                 line.lineWidth = 1
                 line.move(to: NSPoint(x: x - 0.5, y: bounds.minY))
                 line.line(to: NSPoint(x: x - 0.5, y: bounds.maxY))
-                line.stroke()
+                // Resolve the grid color in the table's appearance so it matches the
+                // internal grid lines (the overlay's own appearance may differ, which
+                // made the line look too light in dark mode).
+                tableView.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    tableView.gridColor.setStroke()
+                    line.stroke()
+                }
             }
         }
 
@@ -948,8 +953,20 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
         controller.onRowsLoaded = { [weak self] rows in
             guard let self else { return }
-            let columns = IndexSet(integersIn: 0..<self.tableView.numberOfColumns)
-            self.tableView.reloadData(forRowIndexes: rows, columnIndexes: columns)
+            // Only reload the on-screen columns. Reloading all columns (e.g. 184 on a
+            // wide file) rebuilds ~rows×184 cells per page load and freezes the UI;
+            // off-screen columns aren't visible anyway and reload lazily when scrolled to.
+            let visibleRows = self.tableView.rows(in: self.tableView.visibleRect)
+            let visibleColumns = self.tableView.columnIndexes(in: self.tableView.visibleRect)
+            let rowsToReload: IndexSet
+            if visibleRows.length > 0 {
+                let visibleSet = IndexSet(integersIn: visibleRows.location..<(visibleRows.location + visibleRows.length))
+                rowsToReload = rows.intersection(visibleSet)
+            } else {
+                rowsToReload = []
+            }
+            guard !rowsToReload.isEmpty, !visibleColumns.isEmpty else { return }
+            self.tableView.reloadData(forRowIndexes: rowsToReload, columnIndexes: visibleColumns)
         }
         lazyController = controller
         controller.start()
