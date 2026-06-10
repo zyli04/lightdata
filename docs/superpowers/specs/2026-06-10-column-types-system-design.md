@@ -44,8 +44,8 @@ LightData 的"类型"(types)功能把 Notion 式的列类型(text/number/date/ch
 
 1. **贴类型那一刻**:走 A 的门禁,整列(非空)全符合才让贴。
 2. **types ON 且列有格式型时的后续输入**:
-   - `number` / `date`:用**原生 `NSFormatter`**(`NSNumberFormatter` / `NSDateFormatter`)挂到内联编辑器,非法输入当场拒绝提交。
-   - `url`:不做逐键拦截;**贴后某格若不是合法 URL,则那一格退回纯文本渲染**(优雅降级,只当安全网,不整列降级)。
+   - `number` / `date`:**提交时校验**——内联编辑器是 `NSTextView`(不接受 `NSFormatter`),所以在 `commitActiveCellEditor` 处用 `ColumnTypeValidator.matches` 把关,非法值拒绝写入(beep,单元格保持原值)。空值放行。
+   - `url`:不做输入拦截;**贴后某格若不是合法 URL,则那一格退回纯文本渲染**(优雅降级,只当安全网,不整列降级)。
    - `checkbox`:经勾选控件编辑,不存在打字,不需要拦截。
    - 空值在所有情况下放行。
 3. **types OFF**:自由输入任何内容,不校验。

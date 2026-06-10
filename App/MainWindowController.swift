@@ -15,6 +15,7 @@ extension NSMenu {
 
 protocol DataCellMouseHandling: AnyObject {
     func dataCellControlShouldHandleMouseDown(visibleRow: Int, columnIndex: Int, event: NSEvent) -> Bool
+    func dataCellRequestsTagPicker(documentRow: Int, columnIndex: Int, multi: Bool, sourceView: NSView)
 }
 
 final class DataCellTextField: NSTextField {
@@ -196,15 +197,58 @@ final class DataCellButton: NSButton {
     }
 }
 
-final class DataCellPopupButton: NSPopUpButton {
+/// Display-only cell for select/multiSelect/status: draws Notion-style colored, rounded
+/// "pill" tags. Self-drawn because AppKit has no native colored-tag control, and the
+/// native alternatives (NSPopUpButton/NSTokenField) dim in read-only mode and can't be
+/// cleanly colored. Editing is delegated to native pickers via the mouse handler; this
+/// view only renders. Colors come from appearance-adaptive NSColor.system* values.
+final class PillCellView: NSView {
     weak var mouseHandler: DataCellMouseHandling?
     var visibleRow = 0
     var documentRow = 0
     var columnIndex = 0
+    var rawValue = ""
+    var multi = false
+    var editable = false
+    var tokens: [(text: String, color: NSColor)] = [] { didSet { needsDisplay = true } }
+    var selectionFill: NSColor? { didSet { needsDisplay = true } }
+
+    private static let pillFont = NSFont.systemFont(ofSize: 12)
+    private static let pillHeight: CGFloat = 18
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if let selectionFill {
+            selectionFill.setFill()
+            NSBezierPath(rect: bounds).fill()
+        }
+        let height = Self.pillHeight
+        let top = (bounds.height - height) / 2
+        var x: CGFloat = 8
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        for token in tokens {
+            guard x < bounds.width - 12 else { break }
+            let attributes: [NSAttributedString.Key: Any] = [.font: Self.pillFont, .foregroundColor: token.color, .paragraphStyle: paragraph]
+            let text = token.text as NSString
+            let textSize = text.size(withAttributes: attributes)
+            let pillWidth = min(textSize.width, bounds.width - x - 12) + 14
+            let pillRect = NSRect(x: x, y: top, width: pillWidth, height: height)
+            let path = NSBezierPath(roundedRect: pillRect, xRadius: 5, yRadius: 5)
+            token.color.withAlphaComponent(0.16).setFill()
+            path.fill()
+            let textRect = NSRect(x: x + 7, y: top + (height - textSize.height) / 2, width: pillWidth - 12, height: textSize.height)
+            text.draw(in: textRect, withAttributes: attributes)
+            x += pillWidth + 4
+        }
+    }
 
     override func mouseDown(with event: NSEvent) {
-        if mouseHandler?.dataCellControlShouldHandleMouseDown(visibleRow: visibleRow, columnIndex: columnIndex, event: event) == true {
-            super.mouseDown(with: event)
+        guard mouseHandler?.dataCellControlShouldHandleMouseDown(visibleRow: visibleRow, columnIndex: columnIndex, event: event) == true else { return }
+        if editable {
+            mouseHandler?.dataCellRequestsTagPicker(documentRow: documentRow, columnIndex: columnIndex, multi: multi, sourceView: self)
         }
     }
 }
@@ -216,6 +260,25 @@ final class ColumnTypeMenuItem: NSMenuItem {
 
 final class ColumnMenuItem: NSMenuItem {
     var columnIndex = 0
+}
+
+/// Menu item carrying the context to set a single-select cell's value.
+final class TagMenuItem: NSMenuItem {
+    var documentRow = 0
+    var columnIndex = 0
+    var optionName = ""
+}
+
+/// Menu item carrying the context to recolor a tag option.
+final class TagColorMenuItem: NSMenuItem {
+    var columnIndex = 0
+    var optionName = ""
+    var colorName = ""
+}
+
+/// Checkbox in the multi-select popover, carrying its option name.
+final class MultiTagCheckbox: NSButton {
+    var optionName = ""
 }
 
 private enum TableSelectionMode {
@@ -1291,20 +1354,25 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         // Lazy (Parquet) rows are plain read-only text; schema cell types apply only
         // to the in-memory editable path.
         let columnSchema = (!isLazy && metadata.schemaEnabled) ? schema.schema(for: tableDocument.headers[columnIndex]) : ColumnSchema(type: .text)
+        // Graceful degradation: a cell whose value doesn't conform to its column's
+        // format type renders as plain text rather than a broken widget (the safety
+        // net behind the assignment gate and input enforcement).
+        let degraded = columnSchema.type.isFormatType && !ColumnTypeValidator.matches(value, type: columnSchema.type)
+        let effectiveType: ColumnType = degraded ? .text : columnSchema.type
 
-        switch columnSchema.type {
+        switch effectiveType {
         case .checkbox:
             return checkboxCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
         case .select, .status:
-            return popupCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
+            return pillCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex, multi: false)
         case .multiSelect:
-            return multiSelectCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
+            return pillCell(value: value, schema: columnSchema, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex, multi: true)
         case .url:
             return urlCell(value: value, visibleRow: row, documentRow: documentRow, columnIndex: columnIndex)
         default:
             let id = NSUserInterfaceItemIdentifier("DataCell")
             let cell = tableView.makeView(withIdentifier: id, owner: self) as? DataTextCellView ?? makeDataTextCell(identifier: id)
-            configure(textCell: cell, value: value, schema: columnSchema)
+            configure(textCell: cell, value: value, schema: degraded ? ColumnSchema(type: .text) : columnSchema)
             cell.visibleRow = row
             cell.documentRow = documentRow
             cell.columnIndex = columnIndex
@@ -1583,12 +1651,24 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func activateSelectedCellTextInteraction(initialText: String?, activationEvent: NSEvent?) {
-        guard isEditingEnabled,
-              let (visibleRow, visibleColumn) = singleSelectedCell,
-              let cell = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? DataTextCellView else {
-            return
+        guard isEditingEnabled, let (visibleRow, visibleColumn) = singleSelectedCell else { return }
+
+        // Select/multiSelect/status cells open a native picker instead of a text editor.
+        if !isLazy, metadata.schemaEnabled,
+           tableView.tableColumns.indices.contains(visibleColumn),
+           let dataColumn = Int(tableView.tableColumns[visibleColumn].identifier.rawValue),
+           let tableDocument, tableDocument.headers.indices.contains(dataColumn) {
+            let type = schema.schema(for: tableDocument.headers[dataColumn]).type
+            if type == .select || type == .status || type == .multiSelect,
+               let pill = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? PillCellView {
+                dataCellRequestsTagPicker(documentRow: pill.documentRow, columnIndex: dataColumn, multi: type == .multiSelect, sourceView: pill)
+                return
+            }
         }
 
+        guard let cell = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? DataTextCellView else {
+            return
+        }
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: true)
         showInlineCellEditor(for: cell, initialText: initialText, activationEvent: activationEvent)
@@ -1702,7 +1782,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         case #selector(renameColumnClicked(_:)), #selector(deleteColumnClicked(_:)):
             return isEditingEnabled && activeColumnIndex() != nil
         case #selector(setColumnTypeFromMenu(_:)):
-            return metadata.schemaEnabled && activeColumnIndex() != nil
+            guard metadata.schemaEnabled, let tableDocument else { return false }
+            guard let typeItem = menuItem as? ColumnTypeMenuItem,
+                  tableDocument.headers.indices.contains(typeItem.columnIndex) else {
+                return activeColumnIndex() != nil
+            }
+            let header = tableDocument.headers[typeItem.columnIndex]
+            menuItem.state = (typeItem.columnType == schema.schema(for: header).type) ? .on : .off
+            // Gate: a format type is selectable only if the whole column conforms to it.
+            // Text and intent types (select/multiSelect/status) are always selectable.
+            guard typeItem.columnType.isFormatType else { return true }
+            return ColumnTypeValidator.columnConforms(columnValues(typeItem.columnIndex, in: tableDocument), to: typeItem.columnType)
         case #selector(manageColumnOptionsClicked(_:)):
             guard metadata.schemaEnabled else { return false }
             guard let columnIndex = activeColumnIndex(),
@@ -1963,6 +2053,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         metadata.schemaEnabled.toggle()
         if metadata.schemaEnabled {
             schema = SchemaMetadataStore.load(for: tableDocument.url, headers: tableDocument.headers, rows: tableDocument.rows)
+            // Self-heal: drop any saved format type whose column no longer conforms
+            // (e.g. the user edited values to non-numbers while types were off).
+            schema.demoteNonConforming(headers: tableDocument.headers, rows: tableDocument.rows)
+            saveCurrentSchema()
         } else {
             schema = TableSchema()
         }
@@ -2246,40 +2340,6 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         performUndoableCellValue(nextValue, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Toggle Checkbox")
     }
 
-    @objc private func popupChanged(_ sender: DataCellPopupButton) {
-        guard isEditingEnabled else { return }
-        let value = sender.titleOfSelectedItem ?? ""
-        performUndoableCellValue(value, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Set Value")
-    }
-
-    @objc private func multiSelectClicked(_ sender: DataCellButton) {
-        guard isEditingEnabled,
-              var tableDocument,
-              tableDocument.headers.indices.contains(sender.columnIndex) else {
-            return
-        }
-        let header = tableDocument.headers[sender.columnIndex]
-        let columnSchema = schema.schema(for: header)
-        let alert = NSAlert()
-        alert.messageText = "Edit Multi-select"
-        alert.informativeText = "Separate values with \(columnSchema.multiSelectSeparator)"
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        input.stringValue = sender.rawValue
-        alert.accessoryView = input
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            performUndoableCellValue(input.stringValue, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Edit Multi-select")
-            let values = (self.tableDocument?.rows ?? []).compactMap { row in
-                sender.columnIndex < row.count ? row[sender.columnIndex] : nil
-            }
-            schema.setType(.multiSelect, for: header, sampleValues: values)
-            saveCurrentSchema()
-            tableView.reloadData()
-        }
-    }
-
     @objc private func urlClicked(_ sender: DataCellButton) {
         guard let url = URL(string: sender.rawValue),
               url.scheme?.hasPrefix("http") == true else {
@@ -2298,14 +2358,23 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
 
         let header = tableDocument.headers[columnIndex]
-        let sample = tableDocument.rows.compactMap { row in
-            columnIndex < row.count ? row[columnIndex] : nil
+        let sample = columnValues(columnIndex, in: tableDocument)
+        // Safety net behind the menu gate: never let a format type be set on a column
+        // whose data doesn't conform (the menu item should already be disabled).
+        guard ColumnTypeValidator.columnConforms(sample, to: type) else {
+            NSSound.beep()
+            return
         }
         schema.setType(type, for: header, sampleValues: sample)
         saveCurrentSchema()
         buildColumns()
         tableView.reloadData()
         updateStatus()
+    }
+
+    /// All raw values in a data column (used by the type gate to test column conformance).
+    private func columnValues(_ columnIndex: Int, in document: TableDocument) -> [String] {
+        document.rows.compactMap { columnIndex < $0.count ? $0[columnIndex] : nil }
     }
 
     @objc private func manageColumnOptionsClicked(_ sender: Any?) {
@@ -2329,10 +2398,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
-            let palette = ["gray", "blue", "green", "yellow", "red", "purple", "pink", "orange"]
+            let existingColors = Dictionary(columnSchema.options.map { ($0.name, $0.color) }, uniquingKeysWith: { first, _ in first })
             let names = input.stringValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             columnSchema.options = names.enumerated().map { index, name in
-                SelectOption(name: name, color: palette[index % palette.count])
+                // Keep any previously chosen color; auto-assign a system color to new ones.
+                SelectOption(name: name, color: existingColors[name] ?? TagPalette.color(at: index))
             }
             schema.columns[header] = columnSchema
             saveCurrentSchema()
@@ -2645,46 +2715,206 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return cell
     }
 
-    private func popupCell(value: String, schema: ColumnSchema, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
-        let id = NSUserInterfaceItemIdentifier("PopupCell")
-        let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makePopupCell(identifier: id)
-        guard let popup = cell.subviews.first as? DataCellPopupButton else { return cell }
-        popup.removeAllItems()
-        let options = schema.options.map(\.name)
-        popup.addItems(withTitles: options.isEmpty ? [""] : options)
-        if !value.isEmpty, !options.contains(value) {
-            popup.addItem(withTitle: value)
+    /// Display cell for select/status (single) and multiSelect (multi) — renders colored
+    /// pills. Editing is opened via native pickers in dataCellRequestsTagPicker.
+    private func pillCell(value: String, schema columnSchema: ColumnSchema, visibleRow: Int, documentRow: Int, columnIndex: Int, multi: Bool) -> NSView {
+        let id = NSUserInterfaceItemIdentifier(multi ? "MultiPillCell" : "PillCell")
+        let cell: PillCellView
+        if let reused = tableView.makeView(withIdentifier: id, owner: self) as? PillCellView {
+            cell = reused
+        } else {
+            cell = PillCellView()
+            cell.identifier = id
+            cell.translatesAutoresizingMaskIntoConstraints = true
         }
-        popup.selectItem(withTitle: value)
-        popup.isEnabled = isEditingEnabled
-        popup.target = self
-        popup.action = #selector(popupChanged(_:))
-        popup.mouseHandler = self
-        popup.visibleRow = visibleRow
-        popup.documentRow = documentRow
-        popup.columnIndex = columnIndex
-        applySelectionStyle(to: cell, visibleRow: visibleRow, visibleColumn: visibleColumn(forDataColumn: columnIndex) ?? -1)
+        cell.mouseHandler = self
+        cell.visibleRow = visibleRow
+        cell.documentRow = documentRow
+        cell.columnIndex = columnIndex
+        cell.rawValue = value
+        cell.multi = multi
+        cell.editable = isEditingEnabled
+        cell.tokens = tagTokens(for: value, schema: columnSchema, multi: multi)
+        let visibleCol = visibleColumn(forDataColumn: columnIndex) ?? -1
+        cell.selectionFill = isBodyCell(visibleRow: visibleRow, visibleColumn: visibleCol)
+            ? NSColor.controlAccentColor.withAlphaComponent(0.10) : nil
         return cell
     }
 
-    private func multiSelectCell(value: String, schema: ColumnSchema, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
-        let id = NSUserInterfaceItemIdentifier("MultiSelectCell")
-        let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeButtonCell(identifier: id)
-        guard let button = cell.subviews.first as? DataCellButton else { return cell }
-        button.setButtonType(.momentaryPushIn)
-        button.bezelStyle = .rounded
-        button.contentTintColor = nil
-        button.title = displayValue(value, schema: schema).isEmpty ? " " : displayValue(value, schema: schema)
-        button.isEnabled = isEditingEnabled
-        button.target = self
-        button.action = #selector(multiSelectClicked(_:))
-        button.mouseHandler = self
-        button.visibleRow = visibleRow
-        button.documentRow = documentRow
-        button.columnIndex = columnIndex
-        button.rawValue = value
-        applySelectionStyle(to: cell, visibleRow: visibleRow, visibleColumn: visibleColumn(forDataColumn: columnIndex) ?? -1)
-        return cell
+    private func tagTokens(for value: String, schema columnSchema: ColumnSchema, multi: Bool) -> [(text: String, color: NSColor)] {
+        let names: [String]
+        if multi {
+            names = value.split(separator: Character(columnSchema.multiSelectSeparator))
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        } else {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            names = trimmed.isEmpty ? [] : [trimmed]
+        }
+        return names.map { ($0, color(forOptionName: $0, schema: columnSchema)) }
+    }
+
+    private func color(forOptionName name: String, schema columnSchema: ColumnSchema) -> NSColor {
+        Self.systemColor(named: columnSchema.options.first { $0.name == name }?.color ?? "gray")
+    }
+
+    /// Resolves a stored semantic color name to an appearance-adaptive system color, so
+    /// no colors are hand-picked and dark/light adaptation is automatic.
+    static func systemColor(named name: String) -> NSColor {
+        switch name {
+        case "blue": .systemBlue
+        case "green": .systemGreen
+        case "yellow": .systemYellow
+        case "orange": .systemOrange
+        case "red": .systemRed
+        case "pink": .systemPink
+        case "purple": .systemPurple
+        case "indigo": .systemIndigo
+        case "teal": .systemTeal
+        case "cyan": .systemCyan
+        case "mint": .systemMint
+        case "brown": .systemBrown
+        default: .systemGray
+        }
+    }
+
+    /// A small rounded color swatch for menu items.
+    private func swatchImage(color: NSColor, size: CGFloat = 11) -> NSImage {
+        let image = NSImage(size: NSSize(width: size, height: size))
+        image.lockFocus()
+        let rect = NSRect(x: 0, y: 0, width: size, height: size)
+        color.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
+        image.unlockFocus()
+        return image
+    }
+
+    // MARK: - Tag pickers (native menu / popover)
+
+    private struct MultiSelectDraft {
+        let documentRow: Int
+        let columnIndex: Int
+        let separator: String
+        let order: [String]
+        var selected: Set<String>
+        let original: String
+    }
+
+    private var multiSelectPopover: NSPopover?
+    private var multiSelectDraft: MultiSelectDraft?
+
+    func dataCellRequestsTagPicker(documentRow: Int, columnIndex: Int, multi: Bool, sourceView: NSView) {
+        guard isEditingEnabled, let tableDocument,
+              tableDocument.headers.indices.contains(columnIndex),
+              tableDocument.rows.indices.contains(documentRow) else { return }
+        let row = tableDocument.rows[documentRow]
+        let current = columnIndex < row.count ? row[columnIndex] : ""
+        if multi {
+            showMultiSelectPopover(documentRow: documentRow, columnIndex: columnIndex, currentValue: current, sourceView: sourceView)
+        } else {
+            showSingleSelectMenu(documentRow: documentRow, columnIndex: columnIndex, currentValue: current, sourceView: sourceView)
+        }
+    }
+
+    private func showSingleSelectMenu(documentRow: Int, columnIndex: Int, currentValue: String, sourceView: NSView) {
+        guard let tableDocument, tableDocument.headers.indices.contains(columnIndex) else { return }
+        let columnSchema = schema.schema(for: tableDocument.headers[columnIndex])
+        let trimmed = currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let menu = NSMenu()
+
+        let clear = TagMenuItem(title: "None", action: #selector(tagMenuPicked(_:)), keyEquivalent: "")
+        clear.target = self
+        clear.documentRow = documentRow
+        clear.columnIndex = columnIndex
+        clear.optionName = ""
+        clear.state = trimmed.isEmpty ? .on : .off
+        menu.addItem(clear)
+        menu.addItem(.separator())
+
+        var names = columnSchema.options.map(\.name)
+        if !trimmed.isEmpty, !names.contains(trimmed) { names.append(trimmed) }
+        for name in names {
+            let item = TagMenuItem(title: name, action: #selector(tagMenuPicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.documentRow = documentRow
+            item.columnIndex = columnIndex
+            item.optionName = name
+            item.image = swatchImage(color: color(forOptionName: name, schema: columnSchema))
+            item.state = (name == trimmed) ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sourceView.bounds.height), in: sourceView)
+    }
+
+    @objc private func tagMenuPicked(_ sender: TagMenuItem) {
+        performUndoableCellValue(sender.optionName, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Set Value")
+    }
+
+    private func showMultiSelectPopover(documentRow: Int, columnIndex: Int, currentValue: String, sourceView: NSView) {
+        guard let tableDocument, tableDocument.headers.indices.contains(columnIndex) else { return }
+        let columnSchema = schema.schema(for: tableDocument.headers[columnIndex])
+        let separator = columnSchema.multiSelectSeparator
+        let currentTokens = currentValue.split(separator: Character(separator))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var order = columnSchema.options.map(\.name)
+        for token in currentTokens where !order.contains(token) { order.append(token) }
+
+        multiSelectDraft = MultiSelectDraft(
+            documentRow: documentRow,
+            columnIndex: columnIndex,
+            separator: separator,
+            order: order,
+            selected: Set(currentTokens),
+            original: currentValue
+        )
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        if order.isEmpty {
+            let label = NSTextField(labelWithString: "No options yet")
+            label.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(label)
+        }
+        for name in order {
+            let checkbox = MultiTagCheckbox(checkboxWithTitle: name, target: self, action: #selector(multiSelectCheckboxToggled(_:)))
+            checkbox.optionName = name
+            checkbox.state = currentTokens.contains(name) ? .on : .off
+            stack.addArrangedSubview(checkbox)
+        }
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 0))
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 200)
+        ])
+
+        let viewController = NSViewController()
+        viewController.view = container
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.delegate = self
+        popover.contentViewController = viewController
+        multiSelectPopover = popover
+        popover.show(relativeTo: sourceView.bounds, of: sourceView, preferredEdge: .maxY)
+    }
+
+    @objc private func multiSelectCheckboxToggled(_ sender: MultiTagCheckbox) {
+        guard multiSelectDraft != nil else { return }
+        if sender.state == .on {
+            multiSelectDraft?.selected.insert(sender.optionName)
+        } else {
+            multiSelectDraft?.selected.remove(sender.optionName)
+        }
     }
 
     private func urlCell(value: String, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
@@ -2718,20 +2948,6 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             button.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
             button.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -8),
             button.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-        ])
-        return cell
-    }
-
-    private func makePopupCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
-        let cell = NSTableCellView()
-        cell.identifier = identifier
-        let popup = DataCellPopupButton()
-        popup.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(popup)
-        NSLayoutConstraint.activate([
-            popup.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            popup.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            popup.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
         return cell
     }
@@ -2793,9 +3009,59 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         if metadata.schemaEnabled {
             menu.addItem(.separator())
             menu.addItem(typeMenuItem(columnIndex: columnIndex))
-            menu.addItem(columnMenuItem(title: "Manage Options", action: #selector(manageColumnOptionsClicked(_:)), columnIndex: columnIndex))
+            if let tableDocument, tableDocument.headers.indices.contains(columnIndex) {
+                let type = schema.schema(for: tableDocument.headers[columnIndex]).type
+                if type == .select || type == .multiSelect || type == .status {
+                    menu.addItem(columnMenuItem(title: "Manage Options", action: #selector(manageColumnOptionsClicked(_:)), columnIndex: columnIndex))
+                    menu.addItem(tagColorsMenuItem(columnIndex: columnIndex))
+                }
+            }
         }
         return menu
+    }
+
+    /// Submenu to recolor each tag option using the appearance-adaptive system palette.
+    private func tagColorsMenuItem(columnIndex: Int) -> NSMenuItem {
+        let item = NSMenuItem(title: "Tag Colors", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        if let tableDocument, tableDocument.headers.indices.contains(columnIndex) {
+            let columnSchema = schema.schema(for: tableDocument.headers[columnIndex])
+            if columnSchema.options.isEmpty {
+                let empty = NSMenuItem(title: "No options yet", action: nil, keyEquivalent: "")
+                empty.isEnabled = false
+                submenu.addItem(empty)
+            }
+            for option in columnSchema.options {
+                let optionItem = NSMenuItem(title: option.name, action: nil, keyEquivalent: "")
+                optionItem.image = swatchImage(color: Self.systemColor(named: option.color))
+                let colorMenu = NSMenu()
+                for colorName in TagPalette.names {
+                    let colorItem = TagColorMenuItem(title: colorName.capitalized, action: #selector(setOptionColor(_:)), keyEquivalent: "")
+                    colorItem.target = self
+                    colorItem.columnIndex = columnIndex
+                    colorItem.optionName = option.name
+                    colorItem.colorName = colorName
+                    colorItem.image = swatchImage(color: Self.systemColor(named: colorName))
+                    colorItem.state = (option.color == colorName) ? .on : .off
+                    colorMenu.addItem(colorItem)
+                }
+                optionItem.submenu = colorMenu
+                submenu.addItem(optionItem)
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func setOptionColor(_ sender: TagColorMenuItem) {
+        guard let tableDocument, tableDocument.headers.indices.contains(sender.columnIndex) else { return }
+        let header = tableDocument.headers[sender.columnIndex]
+        var columnSchema = schema.schema(for: header)
+        guard let index = columnSchema.options.firstIndex(where: { $0.name == sender.optionName }) else { return }
+        columnSchema.options[index].color = sender.colorName
+        schema.columns[header] = columnSchema
+        saveCurrentSchema()
+        tableView.reloadData()
     }
 
     private func contextMenuItem(title: String, action: Selector) -> NSMenuItem {
@@ -3323,6 +3589,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         window?.makeFirstResponder(tableView)
 
         guard editor.commitsChanges else { return }
+        // Enforce format-typed input while types are on: number/date columns reject
+        // non-conforming text (empty is always allowed). url degrades; checkbox isn't
+        // typed. The discarded edit leaves the cell at its previous value.
+        if metadata.schemaEnabled, !isLazy, let tableDocument,
+           tableDocument.headers.indices.contains(source.columnIndex) {
+            let type = schema.schema(for: tableDocument.headers[source.columnIndex]).type
+            if (type == .number || type == .date), !ColumnTypeValidator.matches(newValue, type: type) {
+                NSSound.beep()
+                return
+            }
+        }
         let rawValue = rawValueForEditedText(newValue, columnIndex: source.columnIndex, rawValue: source.rawValue)
         guard rawValue != source.rawValue else { return }
         performUndoableCellValue(rawValue, documentRow: source.documentRow, column: source.columnIndex, actionName: "Edit Cell")
@@ -3581,17 +3858,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func colorForTag(_ value: String, schema: ColumnSchema) -> NSColor {
         let name = value.split(separator: Character(schema.multiSelectSeparator)).first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? value
-        let colorName = schema.options.first { $0.name == name }?.color ?? "gray"
-        switch colorName {
-        case "blue": return .systemBlue
-        case "green": return .systemGreen
-        case "yellow": return .systemYellow
-        case "red": return .systemRed
-        case "purple": return .systemPurple
-        case "pink": return .systemPink
-        case "orange": return .systemOrange
-        default: return .secondaryLabelColor
-        }
+        return color(forOptionName: name, schema: schema)
     }
 
     private func showError(_ error: Error) {
@@ -3612,6 +3879,19 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             }
         }
         return nil
+    }
+}
+
+extension MainWindowController: NSPopoverDelegate {
+    /// Multi-select edits are batched: the popover stays open while the user toggles
+    /// checkboxes, and the joined value is written back once on close (a single undo).
+    func popoverDidClose(_ notification: Notification) {
+        guard let draft = multiSelectDraft else { return }
+        multiSelectDraft = nil
+        multiSelectPopover = nil
+        let joined = draft.order.filter { draft.selected.contains($0) }.joined(separator: draft.separator)
+        guard joined != draft.original else { return }
+        performUndoableCellValue(joined, documentRow: draft.documentRow, column: draft.columnIndex, actionName: "Edit Multi-select")
     }
 }
 

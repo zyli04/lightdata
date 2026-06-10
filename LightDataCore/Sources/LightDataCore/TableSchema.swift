@@ -22,6 +22,88 @@ public enum ColumnType: String, Codable, CaseIterable {
         case .status: "Status"
         }
     }
+
+    /// Format types have an objective per-value pass/fail test, so they participate in
+    /// the gate: a column may only be declared as one if every (non-empty) value
+    /// conforms. Intent types (select/multiSelect/status) are semantic user choices with
+    /// no machine test — any text "is" a category — so they're excluded from the gate
+    /// and never auto-inferred.
+    public var isFormatType: Bool {
+        switch self {
+        case .number, .date, .url, .checkbox: true
+        case .text, .select, .multiSelect, .status: false
+        }
+    }
+}
+
+/// Pure (Foundation-only) conformance tests for the format types. Shared by inference
+/// and by the UI gate so both agree on what "conforms" means.
+public enum ColumnTypeValidator {
+    public static let defaultTrueValues: Set<String> = ["true", "yes", "1", "y"]
+    public static let defaultFalseValues: Set<String> = ["false", "no", "0", "n"]
+
+    /// Whether a single value conforms to a format type. Empty/whitespace values are
+    /// universally compatible (treated as "no value"), so they never disqualify a column.
+    public static func matches(_ value: String, type: ColumnType) -> Bool {
+        let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !v.isEmpty else { return true }
+        switch type {
+        case .number:
+            return Double(v) != nil
+        case .url:
+            return URL(string: v)?.scheme?.hasPrefix("http") == true
+        case .checkbox:
+            let lower = v.lowercased()
+            return defaultTrueValues.contains(lower) || defaultFalseValues.contains(lower)
+        case .date:
+            return isISO8601Date(v)
+        default:
+            return true
+        }
+    }
+
+    /// The gate predicate: a column may be declared `type` only if every non-empty value
+    /// conforms. Non-format (intent) types are never gated, so they always pass.
+    public static func columnConforms(_ values: [String], to type: ColumnType) -> Bool {
+        guard type.isFormatType else { return true }
+        return values.allSatisfy { matches($0, type: type) }
+    }
+
+    /// The format types this column could legitimately be declared as.
+    public static func conformingFormatTypes(for values: [String]) -> [ColumnType] {
+        ColumnType.allCases.filter { $0.isFormatType && columnConforms(values, to: $0) }
+    }
+
+    // Date conformance is restricted to the unambiguous ISO 8601 family for v1. Locale-
+    // dependent formats (e.g. 03/04/05) are intentionally excluded.
+    private static let isoFormatters: [DateFormatter] = {
+        ["yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm"].map { format in
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(identifier: "UTC")
+            formatter.dateFormat = format
+            formatter.isLenient = false
+            return formatter
+        }
+    }()
+
+    private static func isISO8601Date(_ value: String) -> Bool {
+        isoFormatters.contains { $0.date(from: value) != nil }
+    }
+}
+
+/// The tag color palette, stored as semantic names. The App layer resolves each name to
+/// an appearance-adaptive system color (NSColor.system*), so no colors are hand-picked
+/// and dark/light mode adaptation is free.
+public enum TagPalette {
+    public static let names = [
+        "blue", "green", "yellow", "orange", "red",
+        "pink", "purple", "indigo", "teal", "cyan", "mint", "brown", "gray"
+    ]
+
+    public static func color(at index: Int) -> String {
+        names[index % names.count]
+    }
 }
 
 public struct SelectOption: Codable, Equatable {
@@ -81,6 +163,18 @@ public struct TableSchema: Codable, Equatable {
         columns = columns.filter { valid.contains($0.key) }
     }
 
+    /// Drops any format type that the column's data no longer conforms to (demotes that
+    /// column to text). Called when re-enabling types so stale promises self-heal.
+    public mutating func demoteNonConforming(headers: [String], rows: [[String]]) {
+        for (index, header) in headers.enumerated() {
+            guard let schema = columns[header], schema.type.isFormatType else { continue }
+            let values = rows.compactMap { index < $0.count ? $0[index] : nil }
+            if !ColumnTypeValidator.columnConforms(values, to: schema.type) {
+                columns.removeValue(forKey: header)
+            }
+        }
+    }
+
     public static func inferred(headers: [String], rows: [[String]]) -> TableSchema {
         var schema = TableSchema()
         for (index, header) in headers.enumerated() {
@@ -88,20 +182,21 @@ public struct TableSchema: Codable, Equatable {
                 index < row.count ? row[index].trimmingCharacters(in: .whitespacesAndNewlines) : nil
             }.filter { !$0.isEmpty }
             let type = inferType(from: sample)
-            schema.setType(type, for: header, sampleValues: sample)
+            if type != .text {
+                schema.setType(type, for: header, sampleValues: sample)
+            }
         }
         return schema
     }
 
+    /// Auto-assigns a format type only when the column unambiguously matches exactly one
+    /// (e.g. all ISO dates → date). Ambiguous columns (e.g. all 0/1, which are both
+    /// number and checkbox) stay text for the user to choose. Intent types are never
+    /// inferred.
     private static func inferType(from values: [String]) -> ColumnType {
         guard !values.isEmpty else { return .text }
-        if values.allSatisfy({ URL(string: $0)?.scheme?.hasPrefix("http") == true }) {
-            return .url
-        }
-        if values.allSatisfy({ Double($0) != nil }) {
-            return .number
-        }
-        return .text
+        let matching = ColumnTypeValidator.conformingFormatTypes(for: values)
+        return matching.count == 1 ? matching[0] : .text
     }
 }
 
@@ -113,8 +208,7 @@ private func inferOptions(from values: [String], type: ColumnType, separator: St
         names = values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
-    let palette = ["gray", "blue", "green", "yellow", "red", "purple", "pink", "orange"]
     return Array(Set(names.filter { !$0.isEmpty })).sorted().enumerated().map { index, name in
-        SelectOption(name: name, color: palette[index % palette.count])
+        SelectOption(name: name, color: TagPalette.color(at: index))
     }
 }
