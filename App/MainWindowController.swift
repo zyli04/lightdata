@@ -970,6 +970,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var activeCellEditor: InlineCellEditor?
     private weak var activeCellEditorSource: DataTextCellView?
     private var didBuildInterface = false
+    private var appearanceRefreshScheduled = false
     private var appearanceObservation: NSKeyValueObservation?
     private var titlebarClickMonitor: Any?
     private var fileWatchSource: DispatchSourceFileSystemObject?
@@ -2022,11 +2023,44 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func appearanceDidChange() {
-        scrollView.backgroundColor = .textBackgroundColor
-        statusLabel.textColor = .secondaryLabelColor
-        tableView.reloadData()
-        tableView.needsDisplay = true
-        tableView.headerView?.needsDisplay = true
+        // Fired from both the window's effectiveAppearance KVO and DropView; coalesce to
+        // one refresh, and defer it off the appearance-transition tick.
+        guard !appearanceRefreshScheduled else { return }
+        appearanceRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.appearanceRefreshScheduled = false
+            self.scrollView.backgroundColor = .textBackgroundColor
+            self.statusLabel.textColor = .secondaryLabelColor
+            self.tableView.reloadData()
+            self.tableView.needsDisplay = true
+            self.tableView.headerView?.needsDisplay = true
+            self.updateToolbarState()
+            self.refreshWindowChrome()
+        }
+    }
+
+    /// Works around a macOS "Liquid Glass" toolbar bug: on a live light/dark toggle the
+    /// window and its titlebar *container* re-resolve to the new appearance, but the
+    /// `NSTitlebarView` / `NSToolbarView` subtree keeps an explicitly-pinned vibrant
+    /// appearance (e.g. VibrantLight) and never recomputes — so the toolbar band stays
+    /// stuck on the previous appearance (white in dark mode). `needsDisplay` and a
+    /// theme-frame rebuild don't help because the stale value is the pinned `appearance`,
+    /// not the drawing. Clearing that pin lets the views re-derive the correct vibrant
+    /// variant from their (already-updated) parent. We walk only the window chrome, never
+    /// the content view's subtree.
+    private func refreshWindowChrome() {
+        guard let window, let frameView = window.contentView?.superview else { return }
+        let contentView = window.contentView
+        func clearPinnedVibrant(_ v: NSView) {
+            if let name = v.appearance?.name, name == .vibrantLight || name == .vibrantDark {
+                v.appearance = nil
+            }
+            for sub in v.subviews where sub !== contentView {
+                clearPinnedVibrant(sub)
+            }
+        }
+        clearPinnedVibrant(frameView)
         updateToolbarState()
     }
 
