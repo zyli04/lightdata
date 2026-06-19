@@ -117,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .json: return .json
         case .jsonl: return UTType(filenameExtension: "jsonl") ?? .text
         case .xlsx: return UTType(filenameExtension: "xlsx") ?? .data
+        case .xls: return UTType(filenameExtension: "xls") ?? .data
         case .parquet: return UTType(filenameExtension: "parquet") ?? .data
         }
     }

@@ -6,6 +6,7 @@ public enum TableFileFormat: Equatable {
     case json
     case jsonl
     case xlsx
+    case xls
     case parquet
 
     public var displayName: String {
@@ -15,6 +16,7 @@ public enum TableFileFormat: Equatable {
         case .json: "JSON"
         case .jsonl: "JSONL"
         case .xlsx: "XLSX"
+        case .xls: "XLS"
         case .parquet: "Parquet"
         }
     }
@@ -34,6 +36,7 @@ public enum TableFileFormat: Equatable {
         case .json: "json"
         case .jsonl: "jsonl"
         case .xlsx: "xlsx"
+        case .xls: "xls"
         case .parquet: "parquet"
         }
     }
@@ -195,7 +198,7 @@ public struct TableDocument {
             try JSONTableParser.writeJSON(url: url, headers: headers, rows: rows, encoding: .utf8, lineEnding: .lf)
         case .jsonl:
             try JSONTableParser.writeJSONLines(url: url, headers: headers, rows: rows, encoding: .utf8, lineEnding: .lf)
-        case .xlsx, .parquet:
+        case .xlsx, .xls, .parquet:
             throw TableDocumentError.saveUnsupported("Cannot create a new \(format.displayName) file.")
         }
     }
@@ -222,6 +225,11 @@ public struct TableDocument {
         case "xlsx":
             let table = try XLSXReader.readFirstSheet(url: url, firstRowIsHeader: firstRowIsHeader)
             var doc = TableDocument(url: url, format: .xlsx, headers: table.headers, rows: table.rows, readOnly: true, sheetName: table.sheetName, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            doc.hasHeaderRow = firstRowIsHeader
+            return doc
+        case "xls":
+            let table = try XLSReader.readFirstSheet(url: url, firstRowIsHeader: firstRowIsHeader)
+            var doc = TableDocument(url: url, format: .xls, headers: table.headers, rows: table.rows, readOnly: true, sheetName: table.sheetName, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
             doc.hasHeaderRow = firstRowIsHeader
             return doc
         case "parquet", "pq":
@@ -358,6 +366,8 @@ public struct TableDocument {
             try JSONTableParser.writeJSONLines(url: url, headers: headers, rows: rows, encoding: openInfo.encoding ?? .utf8, lineEnding: openInfo.lineEnding ?? .lf)
         case .xlsx:
             throw TableDocumentError.saveUnsupported("XLSX editing is intentionally disabled in this MVP.")
+        case .xls:
+            throw TableDocumentError.saveUnsupported("XLS editing is intentionally disabled in this MVP.")
         case .parquet:
             throw TableDocumentError.saveUnsupported("Parquet editing is intentionally disabled in this MVP.")
         }
@@ -383,7 +393,7 @@ public struct TableDocument {
             try JSONTableParser.writeJSON(url: targetURL, headers: headers, rows: rows, encoding: encoding, lineEnding: lineEnding)
         case .jsonl:
             try JSONTableParser.writeJSONLines(url: targetURL, headers: headers, rows: rows, encoding: encoding, lineEnding: lineEnding)
-        case .xlsx, .parquet:
+        case .xlsx, .xls, .parquet:
             throw TableDocumentError.saveUnsupported("Exporting to \(targetFormat.displayName) is not supported yet.")
         }
     }

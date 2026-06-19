@@ -7,6 +7,7 @@ enum SupportedFileType {
         .json,
         UTType(filenameExtension: "jsonl") ?? .text,
         UTType(filenameExtension: "xlsx") ?? .data,
+        UTType(filenameExtension: "xls") ?? .data,
         UTType(filenameExtension: "parquet") ?? .data,
         UTType(filenameExtension: "pq") ?? .data
     ]
