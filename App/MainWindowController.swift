@@ -203,13 +203,10 @@ final class DataCellButton: NSButton {
 /// cleanly colored. Editing is delegated to native pickers via the mouse handler; this
 /// view only renders. Colors come from appearance-adaptive NSColor.system* values.
 final class PillCellView: NSView {
-    weak var mouseHandler: DataCellMouseHandling?
     var visibleRow = 0
     var documentRow = 0
     var columnIndex = 0
     var rawValue = ""
-    var multi = false
-    var editable = false
     var tokens: [(text: String, color: NSColor)] = [] { didSet { needsDisplay = true } }
     var selectionFill: NSColor? { didSet { needsDisplay = true } }
 
@@ -231,12 +228,15 @@ final class PillCellView: NSView {
         paragraph.lineBreakMode = .byTruncatingTail
         for token in tokens {
             guard x < bounds.width - 12 else { break }
-            let attributes: [NSAttributedString.Key: Any] = [.font: Self.pillFont, .foregroundColor: token.color, .paragraphStyle: paragraph]
+            // Text is a deepened shade of the tag color (blend toward labelColor), so it
+            // reads clearly on the light tinted fill in both light and dark mode.
+            let textColor = token.color.blended(withFraction: 0.3, of: .labelColor) ?? token.color
+            let attributes: [NSAttributedString.Key: Any] = [.font: Self.pillFont, .foregroundColor: textColor, .paragraphStyle: paragraph]
             let text = token.text as NSString
             let textSize = text.size(withAttributes: attributes)
             let pillWidth = min(textSize.width, bounds.width - x - 12) + 14
             let pillRect = NSRect(x: x, y: top, width: pillWidth, height: height)
-            let path = NSBezierPath(roundedRect: pillRect, xRadius: 5, yRadius: 5)
+            let path = NSBezierPath(roundedRect: pillRect, xRadius: 3, yRadius: 3)
             token.color.withAlphaComponent(0.16).setFill()
             path.fill()
             let textRect = NSRect(x: x + 7, y: top + (height - textSize.height) / 2, width: pillWidth - 12, height: textSize.height)
@@ -245,11 +245,79 @@ final class PillCellView: NSView {
         }
     }
 
-    override func mouseDown(with event: NSEvent) {
-        guard mouseHandler?.dataCellControlShouldHandleMouseDown(visibleRow: visibleRow, columnIndex: columnIndex, event: event) == true else { return }
-        if editable {
-            mouseHandler?.dataCellRequestsTagPicker(documentRow: documentRow, columnIndex: columnIndex, multi: multi, sourceView: self)
+    // Pass mouse events through to the table view so cell selection and drag-select work
+    // uniformly; the picker opens via the activation path (double-click / Enter).
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Display-only cell for url-typed columns: renders the link as plain text (no button
+/// chrome) with the host in label color and the path/query dimmed, both underlined and
+/// the path middle-truncated. Opens via the activation path (double-click / Enter), and
+/// passes mouse events through so selection and drag-select work uniformly.
+final class URLCellView: NSView {
+    var documentRow = 0
+    var columnIndex = 0
+    var rawValue = "" { didSet { needsDisplay = true } }
+    var selectionFill: NSColor? { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if let selectionFill {
+            selectionFill.setFill()
+            NSBezierPath(rect: bounds).fill()
         }
+        let (host, rest) = URLCellView.split(rawValue)
+        guard !host.isEmpty || !rest.isEmpty else { return }
+        let font = NSFont.systemFont(ofSize: 13)
+        let inset = bounds.insetBy(dx: 8, dy: 0)
+
+        let hostParagraph = NSMutableParagraphStyle()
+        hostParagraph.lineBreakMode = .byTruncatingTail
+        let hostAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .underlineColor: NSColor.tertiaryLabelColor,
+            .paragraphStyle: hostParagraph
+        ]
+        let hostSize = (host as NSString).size(withAttributes: hostAttrs)
+        let textHeight = hostSize.height
+        let y = max(0, (bounds.height - textHeight) / 2)
+        let hostWidth = min(hostSize.width, inset.width)
+        (host as NSString).draw(in: NSRect(x: inset.minX, y: y, width: hostWidth, height: textHeight), withAttributes: hostAttrs)
+
+        let restX = inset.minX + hostSize.width
+        if !rest.isEmpty, restX < inset.maxX {
+            let restParagraph = NSMutableParagraphStyle()
+            restParagraph.lineBreakMode = .byTruncatingMiddle
+            let restAttrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .underlineColor: NSColor.tertiaryLabelColor,
+                .paragraphStyle: restParagraph
+            ]
+            (rest as NSString).draw(in: NSRect(x: restX, y: y, width: inset.maxX - restX, height: textHeight), withAttributes: restAttrs)
+        }
+    }
+
+    /// Splits a URL into (host, path+query) for display, dropping the scheme and a leading
+    /// "www." — e.g. https://www.foo.com/bar?x → ("foo.com", "/bar?x").
+    static func split(_ raw: String) -> (host: String, rest: String) {
+        var string = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let schemeRange = string.range(of: "://") {
+            string = String(string[schemeRange.upperBound...])
+        }
+        if string.lowercased().hasPrefix("www.") {
+            string = String(string.dropFirst(4))
+        }
+        if let slash = string.firstIndex(of: "/") {
+            return (String(string[..<slash]), String(string[slash...]))
+        }
+        return (string, "")
     }
 }
 
@@ -1664,6 +1732,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 dataCellRequestsTagPicker(documentRow: pill.documentRow, columnIndex: dataColumn, multi: type == .multiSelect, sourceView: pill)
                 return
             }
+            // URL cells open the link on activation; a degraded (non-URL) value renders as
+            // a plain text cell, so fall through to text editing in that case.
+            if type == .url, let urlView = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? URLCellView {
+                if let url = URL(string: urlView.rawValue), url.scheme?.hasPrefix("http") == true {
+                    NSWorkspace.shared.open(url)
+                }
+                return
+            }
         }
 
         guard let cell = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? DataTextCellView else {
@@ -2340,14 +2416,6 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         performUndoableCellValue(nextValue, documentRow: sender.documentRow, column: sender.columnIndex, actionName: "Toggle Checkbox")
     }
 
-    @objc private func urlClicked(_ sender: DataCellButton) {
-        guard let url = URL(string: sender.rawValue),
-              url.scheme?.hasPrefix("http") == true else {
-            return
-        }
-        NSWorkspace.shared.open(url)
-    }
-
     @objc private func setColumnTypeFromMenu(_ sender: NSMenuItem) {
         guard metadata.schemaEnabled,
               let type = (sender as? ColumnTypeMenuItem)?.columnType ?? sender.representedObject as? ColumnType,
@@ -2727,13 +2795,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             cell.identifier = id
             cell.translatesAutoresizingMaskIntoConstraints = true
         }
-        cell.mouseHandler = self
         cell.visibleRow = visibleRow
         cell.documentRow = documentRow
         cell.columnIndex = columnIndex
         cell.rawValue = value
-        cell.multi = multi
-        cell.editable = isEditingEnabled
         cell.tokens = tagTokens(for: value, schema: columnSchema, multi: multi)
         let visibleCol = visibleColumn(forDataColumn: columnIndex) ?? -1
         cell.selectionFill = isBodyCell(visibleRow: visibleRow, visibleColumn: visibleCol)
@@ -2919,22 +2984,20 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func urlCell(value: String, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
         let id = NSUserInterfaceItemIdentifier("URLCell")
-        let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeButtonCell(identifier: id)
-        guard let button = cell.subviews.first as? DataCellButton else { return cell }
-        button.setButtonType(.momentaryChange)
-        button.bezelStyle = .inline
-        button.title = value
-        button.contentTintColor = .linkColor
-        button.alignment = .left
-        button.isEnabled = !value.isEmpty
-        button.target = self
-        button.action = #selector(urlClicked(_:))
-        button.mouseHandler = self
-        button.visibleRow = visibleRow
-        button.documentRow = documentRow
-        button.columnIndex = columnIndex
-        button.rawValue = value
-        applySelectionStyle(to: cell, visibleRow: visibleRow, visibleColumn: visibleColumn(forDataColumn: columnIndex) ?? -1)
+        let cell: URLCellView
+        if let reused = tableView.makeView(withIdentifier: id, owner: self) as? URLCellView {
+            cell = reused
+        } else {
+            cell = URLCellView()
+            cell.identifier = id
+            cell.translatesAutoresizingMaskIntoConstraints = true
+        }
+        cell.documentRow = documentRow
+        cell.columnIndex = columnIndex
+        cell.rawValue = value
+        let visibleCol = visibleColumn(forDataColumn: columnIndex) ?? -1
+        cell.selectionFill = isBodyCell(visibleRow: visibleRow, visibleColumn: visibleCol)
+            ? NSColor.controlAccentColor.withAlphaComponent(0.10) : nil
         return cell
     }
 
@@ -3424,7 +3487,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         for row in rowRange.location..<upperRow {
             for column in 0..<tableView.numberOfColumns {
                 let view = tableView.view(atColumn: column, row: row, makeIfNecessary: false)
-                if let cell = view as? DataTextCellView {
+                if let cell = view as? PillCellView {
+                    cell.selectionFill = isBodyCell(visibleRow: row, visibleColumn: column)
+                        ? NSColor.controlAccentColor.withAlphaComponent(0.10) : nil
+                } else if let cell = view as? URLCellView {
+                    cell.selectionFill = isBodyCell(visibleRow: row, visibleColumn: column)
+                        ? NSColor.controlAccentColor.withAlphaComponent(0.10) : nil
+                } else if let cell = view as? DataTextCellView {
                     cell.selectionFill = isBodyCell(visibleRow: row, visibleColumn: column)
                         ? NSColor.controlAccentColor.withAlphaComponent(0.10) : nil
                 } else if let cell = view as? NSTableCellView {
