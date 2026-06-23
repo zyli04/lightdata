@@ -228,9 +228,9 @@ final class PillCellView: NSView {
         paragraph.lineBreakMode = .byTruncatingTail
         for token in tokens {
             guard x < bounds.width - 12 else { break }
-            // Text is a deepened shade of the tag color (blend toward labelColor), so it
-            // reads clearly on the light tinted fill in both light and dark mode.
-            let textColor = token.color.blended(withFraction: 0.3, of: .labelColor) ?? token.color
+            // Blend toward labelColor at 0.5 so the text reads clearly on the tinted
+            // fill in both light and dark mode while still showing the tag color.
+            let textColor = token.color.blended(withFraction: 0.5, of: .labelColor) ?? token.color
             let attributes: [NSAttributedString.Key: Any] = [.font: Self.pillFont, .foregroundColor: textColor, .paragraphStyle: paragraph]
             let text = token.text as NSString
             let textSize = text.size(withAttributes: attributes)
@@ -1477,7 +1477,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func tableViewColumnDidResize(_ notification: Notification) {
         updateActiveCellEditorFrame()
-        selectionOverlayView.needsDisplay = true   // trailing line position may change
+        // Force immediate redraw of the trailing grid line during a live column resize;
+        // needsDisplay alone can be deferred until the drag ends, leaving the line behind.
+        selectionOverlayView.needsDisplay = true
+        selectionOverlayView.displayIfNeeded()
         // Live resize fires this many times per drag; debounce the disk write.
         captureMetadata()
         metadataPersistWorkItem?.cancel()
