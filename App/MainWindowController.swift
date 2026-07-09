@@ -321,6 +321,37 @@ final class URLCellView: NSView {
     }
 }
 
+/// A cell view whose value can be edited in the shared inline text editor. The editor
+/// anchors to the view's frame, opens with `editingString`, and writes the result back
+/// through documentRow/columnIndex on commit.
+protocol InlineEditableCellView: NSView {
+    var documentRow: Int { get }
+    var columnIndex: Int { get }
+    var rawValue: String { get }
+    /// The text the editor opens with (what the user sees and edits).
+    var editingString: String { get }
+    var font: NSFont { get }
+    var alignment: NSTextAlignment { get }
+    /// UTF-16 caret index in `editingString` for an activation click at `point`
+    /// (in the cell's coordinate space).
+    func insertionIndex(for point: NSPoint) -> Int
+}
+
+extension DataTextCellView: InlineEditableCellView {
+    var editingString: String { displayString }
+}
+
+extension URLCellView: InlineEditableCellView {
+    var editingString: String { rawValue }
+    var font: NSFont { .systemFont(ofSize: 13) }
+    var alignment: NSTextAlignment { .left }
+    // The rendered text (scheme/www stripped) doesn't map 1:1 onto the raw URL, so a
+    // click position can't be translated; put the caret at the end instead.
+    func insertionIndex(for point: NSPoint) -> Int {
+        (rawValue as NSString).length
+    }
+}
+
 final class ColumnTypeMenuItem: NSMenuItem {
     var columnIndex = 0
     var columnType = ColumnType.text
@@ -373,6 +404,7 @@ protocol DataTableSelectionHandling: AnyObject {
     func beginTextSelection(in cell: DataTextCellView, anchorEvent: NSEvent, firstDragEvent: NSEvent)
     func activateSelectedCellTextInteraction(initialText: String?, activationEvent: NSEvent?)
     func editSelectedCell(initialText: String?)
+    func openLink(atVisibleRow row: Int, visibleColumn column: Int) -> Bool
     func moveSelectedCell(rowDelta: Int, columnDelta: Int)
     func endActiveCellTextInteraction(commit: Bool)
     func clearSelection()
@@ -568,6 +600,12 @@ final class DataTableView: NSTableView {
             }
         } else {
             selectionHandler?.selectCellRange(from: (row, column), to: (row, column))
+            // Cmd+click on a URL-typed cell (Types On) opens the link instead of
+            // starting a drag/edit interaction.
+            if event.modifierFlags.contains(.command),
+               selectionHandler?.openLink(atVisibleRow: row, visibleColumn: column) == true {
+                return
+            }
             if event.clickCount >= 2 {
                 DispatchQueue.main.async { [weak self] in
                     self?.selectionHandler?.activateSelectedCellTextInteraction(initialText: nil, activationEvent: event)
@@ -970,7 +1008,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var activeTextSelectionView: CellTextSelectionOverlay?
     private weak var activeTextSelectionSource: DataTextCellView?
     private var activeCellEditor: InlineCellEditor?
-    private weak var activeCellEditorSource: DataTextCellView?
+    private weak var activeCellEditorSource: (any InlineEditableCellView)?
     private var didBuildInterface = false
     private var appearanceRefreshScheduled = false
     private var appearanceObservation: NSKeyValueObservation?
@@ -1737,22 +1775,31 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 dataCellRequestsTagPicker(documentRow: pill.documentRow, columnIndex: dataColumn, multi: type == .multiSelect, sourceView: pill)
                 return
             }
-            // URL cells open the link on activation; a degraded (non-URL) value renders as
-            // a plain text cell, so fall through to text editing in that case.
-            if type == .url, let urlView = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? URLCellView {
-                if let url = URL(string: urlView.rawValue), url.scheme?.hasPrefix("http") == true {
-                    NSWorkspace.shared.open(url)
-                }
-                return
-            }
+            // URL cells fall through to the generic editing path below (they conform to
+            // InlineEditableCellView and edit their raw value like a text cell); opening
+            // the link is Cmd+click only (openLink).
         }
 
-        guard let cell = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? DataTextCellView else {
+        guard let cell = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? InlineEditableCellView else {
             return
         }
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: true)
         showInlineCellEditor(for: cell, initialText: initialText, activationEvent: activationEvent)
+    }
+
+    /// Cmd+click on a URL-typed cell opens the link in the default browser; returns
+    /// whether the click was consumed. A URLCellView only exists when Types are on and
+    /// the value conforms (http/https), so checking the view type covers the gating.
+    /// Deliberately not gated on edit mode — opening a link is navigation, not editing.
+    func openLink(atVisibleRow row: Int, visibleColumn column: Int) -> Bool {
+        guard let urlView = tableView.view(atColumn: column, row: row, makeIfNecessary: false) as? URLCellView,
+              let url = URL(string: urlView.rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme?.hasPrefix("http") == true else {
+            return false
+        }
+        NSWorkspace.shared.open(url)
+        return true
     }
 
     func moveSelectedCell(rowDelta: Int, columnDelta: Int) {
@@ -3638,7 +3685,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         overlay.beginSelection(anchorEvent: anchorEvent, firstDragEvent: firstDragEvent)
     }
 
-    private func showInlineCellEditor(for cell: DataTextCellView, initialText: String?, activationEvent: NSEvent?) {
+    private func showInlineCellEditor(for cell: InlineEditableCellView, initialText: String?, activationEvent: NSEvent?) {
         let editable = isEditingEnabled
         let cellFrameInTable = cell.convert(cell.bounds, to: tableView)
         let editorFrame = cellFrameInTable.insetBy(dx: 1, dy: 2)
@@ -3664,7 +3711,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         editor.textContainer?.lineFragmentPadding = 0
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.heightTracksTextView = true
-        editor.string = editable ? (initialText ?? cell.displayString) : cell.displayString
+        editor.string = editable ? (initialText ?? cell.editingString) : cell.editingString
         editor.autoresizingMask = []
 
         cell.isHidden = true
@@ -3693,7 +3740,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func initialEditorSelectedRange(
         for editor: InlineCellEditor,
-        source: DataTextCellView,
+        source: InlineEditableCellView,
         initialText: String?,
         activationEvent: NSEvent?
     ) -> NSRange {
@@ -3753,7 +3800,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         commitActiveCellEditor(value: newValue, editor: editor, source: source)
     }
 
-    private func commitActiveCellEditor(value newValue: String, editor: InlineCellEditor, source: DataTextCellView) {
+    private func commitActiveCellEditor(value newValue: String, editor: InlineCellEditor, source: InlineEditableCellView) {
         editor.removeFromSuperview()
         activeCellEditor = nil
         source.isHidden = false
