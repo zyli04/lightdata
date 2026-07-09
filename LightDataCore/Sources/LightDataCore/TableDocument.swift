@@ -312,6 +312,26 @@ public struct TableDocument {
         dirty = true
     }
 
+    /// Inserts a column at `index` (clamped), filling `values` row by row; missing
+    /// entries become "". An empty `name` falls back to "Column N", and duplicates are
+    /// uniqued the same way renameColumn is.
+    public mutating func insertColumn(at index: Int, named name: String, values: [String] = []) {
+        guard !readOnly else { return }
+        let clamped = min(max(index, 0), headers.count)
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        headers.insert(trimmed.isEmpty ? "Column \(clamped + 1)" : trimmed, at: clamped)
+        headers = makeUnique(headers)
+        for rowIndex in rows.indices {
+            // Rows can be ragged (shorter than headers); pad so the insert lands at the
+            // intended position.
+            if rows[rowIndex].count < clamped {
+                rows[rowIndex].append(contentsOf: Array(repeating: "", count: clamped - rows[rowIndex].count))
+            }
+            rows[rowIndex].insert(rowIndex < values.count ? values[rowIndex] : "", at: clamped)
+        }
+        dirty = true
+    }
+
     public mutating func reorderColumns(to order: [Int]) {
         guard !readOnly,
               order.count == headers.count,

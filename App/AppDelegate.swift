@@ -291,6 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(NSMenuItem(title: "Edit Cell", action: Selector(("editSelectedCellClicked:")), keyEquivalent: "\r"))
         editMenu.addItem(NSMenuItem(title: "Toggle Edit Mode", action: Selector(("toggleEditModeClicked:")), keyEquivalent: "e"))
         editMenu.addItem(NSMenuItem(title: "Add Row", action: Selector(("addRowClicked:")), keyEquivalent: "n"))
+        editMenu.addItem(NSMenuItem(title: "Add Column", action: Selector(("addColumnClicked:")), keyEquivalent: "N"))
         editMenu.addItem(NSMenuItem(title: "Delete Selected Rows", action: Selector(("deleteRowsClicked:")), keyEquivalent: "\u{8}"))
         editMenu.addItem(NSMenuItem(title: "Rename Column", action: Selector(("renameColumnClicked:")), keyEquivalent: "r"))
         editMenu.addItem(NSMenuItem(title: "Delete Column", action: Selector(("deleteColumnClicked:")), keyEquivalent: ""))

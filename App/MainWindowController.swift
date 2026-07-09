@@ -997,6 +997,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private weak var editModeItem: NSToolbarItem?
     private weak var addRowItem: NSToolbarItem?
+    private weak var addColumnItem: NSToolbarItem?
     private weak var deleteRowItem: NSToolbarItem?
     private weak var typeModeItem: NSToolbarItem?
     private weak var filterItem: NSToolbarItem?
@@ -1903,8 +1904,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             return isEditingEnabled
         case #selector(editSelectedCellClicked(_:)):
             return canEditSelectedCell
-        case #selector(addRowClicked(_:)):
+        case #selector(addRowClicked(_:)), #selector(addColumnClicked(_:)):
             return isEditingEnabled
+        case #selector(insertColumnBeforeClicked(_:)), #selector(insertColumnAfterClicked(_:)):
+            return isEditingEnabled && activeColumnIndex() != nil
         case #selector(deleteRowsClicked(_:)):
             return isEditingEnabled && selectionMode == .rows && !tableView.selectedRowIndexes.isEmpty
         case #selector(renameColumnClicked(_:)), #selector(deleteColumnClicked(_:)):
@@ -1941,11 +1944,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.newTab, .openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
+        [.newTab, .openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .addColumn, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.newTab, .openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
+        [.newTab, .openFile, .saveFile, .toggleEdit, .toggleTypes, .filterPanel, .addRow, .addColumn, .deleteRow, .fileInfo, .flexibleSpace, .searchField]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -2030,6 +2033,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             item.action = #selector(addRowClicked(_:))
             item.autovalidates = false
             addRowItem = item
+            return item
+        case .addColumn:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Add Column"
+            item.paletteLabel = "Add Column"
+            item.toolTip = "Add a new column"
+            item.image = NSImage(systemSymbolName: "plus.rectangle.portrait", accessibilityDescription: "Add Column")
+            item.target = self
+            item.action = #selector(addColumnClicked(_:))
+            item.autovalidates = false
+            addColumnItem = item
             return item
         case .deleteRow:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -2294,6 +2308,79 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateToolbarState()
     }
 
+    /// Inserts an (optionally value-filled) column at a document index, registering the
+    /// inverse delete for undo. `values` is only non-empty on the redo path, restoring
+    /// what the paired delete captured.
+    private func performUndoableInsertColumn(at index: Int, name: String, values: [String] = [], actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        let clamped = min(max(index, 0), doc.headers.count)
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableDeleteColumn(at: clamped, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        tableDocument?.insertColumn(at: clamped, named: name, values: values)
+        guard let updated = tableDocument else { return }
+        spliceIntoColumnOrder(updated.headers[clamped], documentIndex: clamped, headers: updated.headers)
+        columnListChanged()
+        if let visible = visibleColumn(forDataColumn: clamped) {
+            selectColumnRange(from: visible, to: visible)
+            tableView.scrollColumnToVisible(visible)
+        }
+    }
+
+    /// Inverse of performUndoableInsertColumn: captures the column's current contents so
+    /// redo restores any values typed into it between the add and the undo.
+    private func performUndoableDeleteColumn(at index: Int, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly, doc.headers.indices.contains(index) else { return }
+        let name = doc.headers[index]
+        let values = doc.rows.map { index < $0.count ? $0[index] : "" }
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableInsertColumn(at: index, name: name, values: values, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+        tableDocument?.deleteColumn(at: index)
+        metadata.columnOrder.removeAll { $0 == name }
+        metadata.columnWidths.removeValue(forKey: name)
+        if let tableDocument {
+            schema.removeMissingColumns(validHeaders: tableDocument.headers)
+            saveCurrentSchema()
+        }
+        columnListChanged()
+    }
+
+    /// Keeps a persisted custom column order in step with a document-position insert;
+    /// without this the new column would land at the end of the visible order. `headers`
+    /// is the post-insert header list.
+    private func spliceIntoColumnOrder(_ newHeader: String, documentIndex: Int, headers: [String]) {
+        guard !metadata.columnOrder.isEmpty else { return }
+        var order = metadata.columnOrder.filter { $0 != newHeader }
+        let position: Int
+        if documentIndex > 0, let left = order.firstIndex(of: headers[documentIndex - 1]) {
+            position = left + 1
+        } else if documentIndex + 1 < headers.count, let right = order.firstIndex(of: headers[documentIndex + 1]) {
+            position = right
+        } else {
+            position = documentIndex == 0 ? 0 : order.count
+        }
+        order.insert(newHeader, at: position)
+        metadata.columnOrder = order
+    }
+
+    /// Refreshes and persists everything derived from the set of document columns after
+    /// a column is added or removed.
+    private func columnListChanged() {
+        if let doc = tableDocument, !doc.hasHeaderRow {
+            // Headerless files keep their display-only names in view memory.
+            metadata.headerlessColumnNames = doc.headers
+        }
+        buildColumns()
+        refreshFilterControls()
+        rebuildVisibleRows()
+        updateStatus()
+        updateToolbarState()
+        persistViewMetadata()
+    }
+
     private func performUndoableMoveRows(_ indices: IndexSet, to target: Int, actionName: String) {
         guard let doc = tableDocument, !doc.readOnly else { return }
         let sorted = indices.sorted().filter { doc.rows.indices.contains($0) }
@@ -2400,6 +2487,28 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
         let emptyRow = Array(repeating: "", count: doc.headers.count)
         performUndoableInsertRows([insertedIndex: emptyRow], actionName: "Add Row")
+    }
+
+    /// Toolbar / Edit-menu Add Column: inserts after the rightmost selected column,
+    /// or at the end when no column is selected (mirrors Add Row).
+    @objc func addColumnClicked(_ sender: Any?) {
+        guard isEditingEnabled, let doc = tableDocument else { return }
+        let selectedDocColumns = selectedDataVisibleColumns().compactMap { visible -> Int? in
+            guard tableView.tableColumns.indices.contains(visible) else { return nil }
+            return Int(tableView.tableColumns[visible].identifier.rawValue)
+        }
+        let insertIndex = selectedDocColumns.max().map { $0 + 1 } ?? doc.headers.count
+        performUndoableInsertColumn(at: insertIndex, name: "Column \(doc.headers.count + 1)", actionName: "Add Column")
+    }
+
+    @objc func insertColumnBeforeClicked(_ sender: Any?) {
+        guard isEditingEnabled, let doc = tableDocument, let columnIndex = columnIndex(from: sender) else { return }
+        performUndoableInsertColumn(at: columnIndex, name: "Column \(doc.headers.count + 1)", actionName: "Insert Column")
+    }
+
+    @objc func insertColumnAfterClicked(_ sender: Any?) {
+        guard isEditingEnabled, let doc = tableDocument, let columnIndex = columnIndex(from: sender) else { return }
+        performUndoableInsertColumn(at: columnIndex + 1, name: "Column \(doc.headers.count + 1)", actionName: "Insert Column")
     }
 
     @objc func deleteRowsClicked(_ sender: Any?) {
@@ -3216,6 +3325,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         setContextColumnFromVisibleColumn(visibleColumn)
         guard let columnIndex = contextColumnIndex else { return nil }
         let menu = NSMenu()
+        menu.addItem(columnMenuItem(title: "Insert Column Before", action: #selector(insertColumnBeforeClicked(_:)), columnIndex: columnIndex))
+        menu.addItem(columnMenuItem(title: "Insert Column After", action: #selector(insertColumnAfterClicked(_:)), columnIndex: columnIndex))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(columnMenuItem(title: "Rename Column", action: #selector(renameColumnClicked(_:)), columnIndex: columnIndex))
         menu.addItem(columnMenuItem(title: "Delete Column", action: #selector(deleteColumnClicked(_:)), columnIndex: columnIndex))
         if metadata.schemaEnabled {
@@ -3490,6 +3602,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             )
         }
         setEnabled(isEditingEnabled, on: addRowItem)
+        setEnabled(isEditingEnabled, on: addColumnItem)
         setEnabled(isEditingEnabled && selectionMode == .rows && !selectionRange.rows.isEmpty, on: deleteRowItem)
         setEnabled(tableDocument != nil, on: typeModeItem)
         // Search and filter trigger full-table scans that are pathological on lazy
@@ -4123,6 +4236,7 @@ private extension NSToolbarItem.Identifier {
     static let toggleTypes = NSToolbarItem.Identifier("LightDataToggleTypes")
     static let filterPanel = NSToolbarItem.Identifier("LightDataFilterPanel")
     static let addRow = NSToolbarItem.Identifier("LightDataAddRow")
+    static let addColumn = NSToolbarItem.Identifier("LightDataAddColumn")
     static let deleteRow = NSToolbarItem.Identifier("LightDataDeleteRow")
     static let searchField = NSToolbarItem.Identifier("LightDataSearchField")
 }
