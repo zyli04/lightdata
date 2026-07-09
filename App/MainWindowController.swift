@@ -228,9 +228,9 @@ final class PillCellView: NSView {
         paragraph.lineBreakMode = .byTruncatingTail
         for token in tokens {
             guard x < bounds.width - 12 else { break }
-            // Blend toward labelColor at 0.5 so the text reads clearly on the tinted
+            // Blend toward labelColor at 0.7 so the text reads clearly on the tinted
             // fill in both light and dark mode while still showing the tag color.
-            let textColor = token.color.blended(withFraction: 0.5, of: .labelColor) ?? token.color
+            let textColor = token.color.blended(withFraction: 0.7, of: .labelColor) ?? token.color
             let attributes: [NSAttributedString.Key: Any] = [.font: Self.pillFont, .foregroundColor: textColor, .paragraphStyle: paragraph]
             let text = token.text as NSString
             let textSize = text.size(withAttributes: attributes)
@@ -429,26 +429,6 @@ final class SelectionOverlayView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let tableView else { return }
-
-        // Trailing vertical grid line after the last column — drawn here (top-most
-        // overlay) so per-row backgrounds can't paint over it. Always shown.
-        if tableView.numberOfColumns > 0 {
-            let edgeX = tableView.rect(ofColumn: tableView.numberOfColumns - 1).maxX
-            let x = tableView.convert(NSPoint(x: edgeX, y: 0), to: self).x
-            if x >= bounds.minX, x <= bounds.maxX {
-                let line = NSBezierPath()
-                line.lineWidth = 1
-                line.move(to: NSPoint(x: x - 0.5, y: bounds.minY))
-                line.line(to: NSPoint(x: x - 0.5, y: bounds.maxY))
-                // Resolve the grid color in the table's appearance so it matches the
-                // internal grid lines (the overlay's own appearance may differ, which
-                // made the line look too light in dark mode).
-                tableView.effectiveAppearance.performAsCurrentDrawingAppearance {
-                    tableView.gridColor.setStroke()
-                    line.stroke()
-                }
-            }
-        }
 
         guard selectionRange.mode == .cells,
               !selectionRange.isEmpty,
@@ -826,7 +806,7 @@ final class DataTableHeaderView: NSTableHeaderView {
         let point = convert(event.locationInWindow, from: nil)
         let column = self.column(at: point)
         guard column >= 0 else {
-            super.mouseDown(with: event)
+            trackingNativeHeaderDrag { super.mouseDown(with: event) }
             return
         }
 
@@ -852,7 +832,7 @@ final class DataTableHeaderView: NSTableHeaderView {
         // work before this previously cancelled the drag. Sync selection afterwards,
         // using the column reference so we follow it to its new position if reordered.
         let draggedColumn = tableView?.tableColumns[column]
-        super.mouseDown(with: event)
+        trackingNativeHeaderDrag { super.mouseDown(with: event) }
         if let draggedColumn, let newIndex = tableView?.tableColumns.firstIndex(of: draggedColumn) {
             selectionHandler?.selectColumnRange(from: newIndex, to: newIndex)
             // One drag = one undo step: the column ended at newIndex after starting at
@@ -861,6 +841,23 @@ final class DataTableHeaderView: NSTableHeaderView {
                 columnActionHandler?.registerColumnDragUndo(originalIndex: column, newIndex: newIndex)
             }
         }
+    }
+
+    /// NSTableHeaderView's native mouseDown blocks in a modal tracking loop for the whole
+    /// column resize/reorder drag, and on this macOS no delegate callback or notification
+    /// fires until mouse-up. A timer in .common run-loop modes still fires inside that
+    /// tracking loop, so poll the controller from it to keep drag-dependent chrome (the
+    /// trailing grid line) in sync live.
+    private func trackingNativeHeaderDrag(_ body: () -> Void) {
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.columnActionHandler?.headerDragTick()
+        }
+        RunLoop.current.add(timer, forMode: .common)
+        defer {
+            timer.invalidate()
+            columnActionHandler?.headerDragTick()
+        }
+        body()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -939,6 +936,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let tableView = DataTableView()
     private let scrollView = NSScrollView()
     private let selectionOverlayView = SelectionOverlayView()
+    /// The vertical grid line after the last column, positioned by frame via
+    /// updateTrailingGridLine(). During a column-resize drag no notification fires, so
+    /// DataTableHeaderView polls headerDragTick() to keep it (and the selection overlay)
+    /// tracking the live column geometry.
+    private let trailingGridLine = NSView()
     private lazy var rowDropIndicator: NSView = {
         let view = NSView()
         view.wantsLayer = true
@@ -1477,10 +1479,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func tableViewColumnDidResize(_ notification: Notification) {
         updateActiveCellEditorFrame()
-        // Force immediate redraw of the trailing grid line during a live column resize;
-        // needsDisplay alone can be deferred until the drag ends, leaving the line behind.
-        selectionOverlayView.needsDisplay = true
-        selectionOverlayView.displayIfNeeded()
+        updateTrailingGridLine()
+        selectionOverlayView.needsDisplay = true   // selection rect position may change
         // Live resize fires this many times per drag; debounce the disk write.
         captureMetadata()
         metadataPersistWorkItem?.cancel()
@@ -2039,6 +2039,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             self.tableView.reloadData()
             self.tableView.needsDisplay = true
             self.tableView.headerView?.needsDisplay = true
+            self.updateTrailingGridLineColor()
             self.updateToolbarState()
             self.refreshWindowChrome()
         }
@@ -2695,17 +2696,80 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         selectionOverlayView.frame = scrollView.contentView.bounds
         selectionOverlayView.isHidden = true
         scrollView.contentView.addSubview(selectionOverlayView, positioned: .above, relativeTo: nil)
+
+        // The trailing grid line lives inside the (passthrough) overlay so it stays above
+        // row backgrounds and never intercepts mouse events. Positioned via frame so it
+        // tracks live during a column-resize drag.
+        trailingGridLine.wantsLayer = true
+        trailingGridLine.isHidden = true
+        selectionOverlayView.addSubview(trailingGridLine)
+        updateTrailingGridLineColor()
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(scrollViewBoundsChanged(_:)),
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
         )
+        // Keeps the line in sync when the table itself is re-laid-out (window resize,
+        // column add/remove). Note this does NOT fire during a column-resize drag — the
+        // table frame is stretched wider than its columns, so growing a column doesn't
+        // change it; live drag tracking comes from headerDragTick() instead.
+        tableView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(tableViewFrameChanged(_:)),
+            name: NSView.frameDidChangeNotification,
+            object: tableView
+        )
+    }
+
+    @objc private func tableViewFrameChanged(_ notification: Notification) {
+        updateTrailingGridLine()
+    }
+
+    /// Called at 60Hz by DataTableHeaderView while the native header tracking loop runs
+    /// (column resize or reorder drag). No delegate callback or notification fires during
+    /// that loop on current macOS, so poll: column geometry does update live, and both
+    /// frame moves and draws composite normally from inside the loop.
+    func headerDragTick() {
+        updateTrailingGridLine()
+        selectionOverlayView.needsDisplay = true
+        updateActiveCellEditorFrame()
+    }
+
+    /// Repositions the trailing grid line to the right edge of the last column, in overlay
+    /// coordinates. Moving the layer-backed subview's frame composites immediately, so the
+    /// line follows a live column-resize drag instead of snapping at the end.
+    func updateTrailingGridLine() {
+        guard tableView.numberOfColumns > 0 else {
+            trailingGridLine.isHidden = true
+            return
+        }
+        let edgeX = tableView.rect(ofColumn: tableView.numberOfColumns - 1).maxX
+        let x = tableView.convert(NSPoint(x: edgeX, y: 0), to: selectionOverlayView).x
+        let bounds = selectionOverlayView.bounds
+        guard x >= bounds.minX, x <= bounds.maxX else {
+            trailingGridLine.isHidden = true
+            return
+        }
+        trailingGridLine.isHidden = false
+        let frame = NSRect(x: x - 0.5, y: bounds.minY, width: 1, height: bounds.height)
+        if trailingGridLine.frame != frame {
+            trailingGridLine.frame = frame
+        }
+    }
+
+    private func updateTrailingGridLineColor() {
+        tableView.effectiveAppearance.performAsCurrentDrawingAppearance {
+            trailingGridLine.layer?.backgroundColor = tableView.gridColor.cgColor
+        }
     }
 
     @objc private func scrollViewBoundsChanged(_ notification: Notification) {
         selectionOverlayView.frame = scrollView.contentView.bounds
         selectionOverlayView.needsDisplay = true
+        updateTrailingGridLine()
         updateActiveCellEditorFrame()
         if isLazy { updateLazyViewport() }
     }
@@ -3296,6 +3360,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateHeaderSortState()
         updateStatus()
         refreshVisibleSelectionAppearance()
+        updateTrailingGridLine()
     }
 
     private func updateStatus() {
