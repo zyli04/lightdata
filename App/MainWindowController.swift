@@ -407,6 +407,10 @@ protocol DataTableSelectionHandling: AnyObject {
     func openLink(atVisibleRow row: Int, visibleColumn column: Int) -> Bool
     func moveSelectedCell(rowDelta: Int, columnDelta: Int)
     func endActiveCellTextInteraction(commit: Bool)
+    /// Drops any in-cell text-selection overlay without touching the inline editor.
+    /// Called from DataTableView's reload overrides — every reload recycles cell views,
+    /// which orphans the overlay (it would float at stale coordinates).
+    func dismissCellTextSelection()
     func clearSelection()
     func canReorderRows() -> Bool
     func showRowDropIndicator(atVisibleIndex index: Int)
@@ -506,6 +510,9 @@ final class CellTextSelectionOverlay: NSView {
         self.cellView = cellView
         super.init(frame: frame)
         wantsLayer = false
+        // NSView no longer clips drawing to bounds by default (macOS 14+); without this
+        // the selection highlight could paint into the neighboring column.
+        clipsToBounds = true
     }
 
     required init?(coder: NSCoder) {
@@ -528,12 +535,19 @@ final class CellTextSelectionOverlay: NSView {
 
         let lowerX = cellView.xPosition(forUTF16Index: selectedRange.location)
         let upperX = cellView.xPosition(forUTF16Index: selectedRange.location + selectedRange.length)
+        // xPosition measures the full (untruncated) string, so for a long value the end
+        // index can land past the cell edge; clamp to the text area (8pt insets) so the
+        // highlight stays symmetric and never spills into the neighboring column.
         let selectionRect = NSRect(
             x: max(0, min(lowerX, upperX)),
             y: max(2, (bounds.height - cellView.font.boundingRectForFont.height) / 2 - 2),
-            width: min(bounds.width, abs(upperX - lowerX)),
+            width: abs(upperX - lowerX),
             height: min(bounds.height - 4, cellView.font.boundingRectForFont.height + 4)
-        )
+        ).intersection(bounds.insetBy(dx: 8, dy: 0))
+        guard !selectionRect.isEmpty else {
+            cellView.drawDisplayString(color: cellView.textColor, clippedTo: nil)
+            return
+        }
 
         NSColor.selectedTextBackgroundColor.setFill()
         NSBezierPath(roundedRect: selectionRect, xRadius: 3, yRadius: 3).fill()
@@ -575,6 +589,20 @@ final class DataTableView: NSTableView {
     private var dragStartRow: Int?
 
     override var acceptsFirstResponder: Bool { true }
+
+    // Reloading recycles cell views, so any text-selection overlay anchored to one
+    // becomes an orphan floating at stale coordinates (and its hidden source cell can
+    // be reused elsewhere, showing up blank). Funnel every reload through a dismiss —
+    // structurally, so no individual reload call site has to remember it.
+    override func reloadData() {
+        selectionHandler?.dismissCellTextSelection()
+        super.reloadData()
+    }
+
+    override func reloadData(forRowIndexes rowIndexes: IndexSet, columnIndexes: IndexSet) {
+        selectionHandler?.dismissCellTextSelection()
+        super.reloadData(forRowIndexes: rowIndexes, columnIndexes: columnIndexes)
+    }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -1441,6 +1469,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         if tableColumn.identifier.rawValue == "rowNumber" {
             let id = NSUserInterfaceItemIdentifier("RowNumberCell")
             let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeCellView(identifier: id)
+            // Reused cells may come back hidden if the inline editor / text-selection
+            // overlay hid them and a reload recycled them; always reset.
+            cell.isHidden = false
             cell.textField?.stringValue = String(documentRow + 1)
             cell.textField?.isEditable = false
             cell.textField?.isSelectable = false
@@ -1483,6 +1514,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         default:
             let id = NSUserInterfaceItemIdentifier("DataCell")
             let cell = tableView.makeView(withIdentifier: id, owner: self) as? DataTextCellView ?? makeDataTextCell(identifier: id)
+            cell.isHidden = false
             configure(textCell: cell, value: value, schema: degraded ? ColumnSchema(type: .text) : columnSchema)
             cell.visibleRow = row
             cell.documentRow = documentRow
@@ -1518,6 +1550,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     func tableViewColumnDidResize(_ notification: Notification) {
         updateActiveCellEditorFrame()
+        updateActiveTextSelectionFrame()
         updateTrailingGridLine()
         selectionOverlayView.needsDisplay = true   // selection rect position may change
         // Live resize fires this many times per drag; debounce the disk write.
@@ -1773,6 +1806,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             let type = schema.schema(for: tableDocument.headers[dataColumn]).type
             if type == .select || type == .status || type == .multiSelect,
                let pill = tableView.view(atColumn: visibleColumn, row: visibleRow, makeIfNecessary: true) as? PillCellView {
+                removeActiveTextSelectionView()
+                removeActiveCellEditor(commit: true)
                 dataCellRequestsTagPicker(documentRow: pill.documentRow, columnIndex: dataColumn, multi: type == .multiSelect, sourceView: pill)
                 return
             }
@@ -1840,6 +1875,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     func endActiveCellTextInteraction(commit: Bool) {
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: commit)
+    }
+
+    func dismissCellTextSelection() {
+        removeActiveTextSelectionView()
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {}
@@ -2097,6 +2136,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             self.appearanceRefreshScheduled = false
             self.scrollView.backgroundColor = .textBackgroundColor
             self.statusLabel.textColor = .secondaryLabelColor
+            // A full reload orphans the text-selection overlay / inline editor (their
+            // source cells are recycled); close them first, committing any typed text.
+            self.endActiveCellTextInteraction(commit: true)
             self.tableView.reloadData()
             self.tableView.needsDisplay = true
             self.tableView.headerView?.needsDisplay = true
@@ -2239,6 +2281,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         saveCurrentMetadata()
         buildColumns()
         refreshFilterControls()
+        endActiveCellTextInteraction(commit: true)
         tableView.reloadData()
         updateStatus()
         updateToolbarState()
@@ -2631,6 +2674,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         schema.setType(type, for: header, sampleValues: sample)
         saveCurrentSchema()
         buildColumns()
+        endActiveCellTextInteraction(commit: true)
         tableView.reloadData()
         updateStatus()
     }
@@ -2669,6 +2713,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             }
             schema.columns[header] = columnSchema
             saveCurrentSchema()
+            endActiveCellTextInteraction(commit: true)
             tableView.reloadData()
         }
     }
@@ -2892,6 +2937,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateTrailingGridLine()
         selectionOverlayView.needsDisplay = true
         updateActiveCellEditorFrame()
+        updateActiveTextSelectionFrame()
     }
 
     /// Repositions the trailing grid line to the right edge of the last column, in overlay
@@ -2927,6 +2973,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         selectionOverlayView.needsDisplay = true
         updateTrailingGridLine()
         updateActiveCellEditorFrame()
+        updateActiveTextSelectionFrame()
         if isLazy { updateLazyViewport() }
     }
 
@@ -3024,6 +3071,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func checkboxCell(value: String, schema: ColumnSchema, visibleRow: Int, documentRow: Int, columnIndex: Int) -> NSView {
         let id = NSUserInterfaceItemIdentifier("CheckboxCell")
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? makeButtonCell(identifier: id)
+        cell.isHidden = false
         guard let button = cell.subviews.first as? DataCellButton else { return cell }
         button.setButtonType(.switch)
         button.title = ""
@@ -3053,6 +3101,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             cell.identifier = id
             cell.translatesAutoresizingMaskIntoConstraints = true
         }
+        cell.isHidden = false
         cell.visibleRow = visibleRow
         cell.documentRow = documentRow
         cell.columnIndex = columnIndex
@@ -3250,6 +3299,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             cell.identifier = id
             cell.translatesAutoresizingMaskIntoConstraints = true
         }
+        cell.isHidden = false
         cell.documentRow = documentRow
         cell.columnIndex = columnIndex
         cell.rawValue = value
@@ -3385,6 +3435,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         columnSchema.options[index].color = sender.colorName
         schema.columns[header] = columnSchema
         saveCurrentSchema()
+        endActiveCellTextInteraction(commit: true)
         tableView.reloadData()
     }
 
@@ -3785,6 +3836,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func showTextSelectionOverlay(for cell: DataTextCellView, anchorEvent: NSEvent, firstDragEvent: NSEvent) {
         removeActiveTextSelectionView()
+        // Mutual exclusion with the inline editor: a text-selection overlay and an open
+        // editor must never coexist (the editor's source cell is hidden; a reload while
+        // both are up orphans whichever anchor gets recycled first).
+        removeActiveCellEditor(commit: true)
 
         let cellFrameInTable = cell.convert(cell.bounds, to: tableView)
         let overlay = CellTextSelectionOverlay(cellView: cell, frame: cellFrameInTable)
@@ -3799,6 +3854,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func showInlineCellEditor(for cell: InlineEditableCellView, initialText: String?, activationEvent: NSEvent?) {
+        // Mutual exclusion (see showTextSelectionOverlay): never leave a text-selection
+        // overlay up while the editor opens.
+        removeActiveTextSelectionView()
         let editable = isEditingEnabled
         let cellFrameInTable = cell.convert(cell.bounds, to: tableView)
         let editorFrame = cellFrameInTable.insetBy(dx: 1, dy: 2)
@@ -3877,6 +3935,19 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
         editor.frame = source.convert(source.bounds, to: tableView).insetBy(dx: 1, dy: 2)
         editor.textContainerInset = NSSize(width: 7, height: max(0, (editor.frame.height - source.font.boundingRectForFont.height) / 2 - 1))
+    }
+
+    /// Mirrors updateActiveCellEditorFrame for the text-selection overlay: keeps it glued
+    /// to its source cell while columns resize, and drops it if the source cell has been
+    /// reloaded out of the hierarchy (its coordinates would be meaningless).
+    private func updateActiveTextSelectionFrame() {
+        guard let overlay = activeTextSelectionView, let source = activeTextSelectionSource else { return }
+        guard source.window != nil, source.superview != nil else {
+            removeActiveTextSelectionView()
+            return
+        }
+        overlay.frame = source.convert(source.bounds, to: tableView)
+        overlay.needsDisplay = true
     }
 
     private func removeActiveTextSelectionView(reloadIfChanged: Bool = false) {
