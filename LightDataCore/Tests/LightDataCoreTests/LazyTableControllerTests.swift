@@ -66,4 +66,33 @@ final class LazyTableControllerTests: XCTestCase {
         wait(for: [filtered], timeout: 5)
         XCTAssertEqual(controller.rowCount, 34)
     }
+
+    func testFetchBlockReturnsRealValuesForUncachedRows() throws {
+        let url = try makeParquet()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try DuckDBTableSource(parquetURL: url)
+        let controller = LazyTableController(source: source, pageSize: 10, cachePages: 5)
+
+        let counted = expectation(description: "count")
+        controller.onRowCountChanged = { _ in counted.fulfill() }
+        controller.start()
+        wait(for: [counted], timeout: 5)
+
+        // Rows 90..95 were never viewported → not in cache (value() is nil), which is
+        // exactly the copy scenario that used to emit "…" placeholders.
+        XCTAssertNil(controller.value(row: 92, column: 0))
+        let block = controller.fetchBlock(rows: 90..<95, columns: [1, 0])
+        XCTAssertEqual(block?.count, 5)
+        XCTAssertEqual(block?[2], ["2", "92"], "row 92 in requested column order (grp, id)")
+    }
+
+    func testFetchBlockClampsInvalidColumnsAndEmptyRange() throws {
+        let url = try makeParquet()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try DuckDBTableSource(parquetURL: url)
+        let controller = LazyTableController(source: source, pageSize: 10, cachePages: 5)
+
+        XCTAssertEqual(controller.fetchBlock(rows: 0..<0, columns: [0]), [])
+        XCTAssertEqual(controller.fetchBlock(rows: 0..<5, columns: [99]), [])
+    }
 }

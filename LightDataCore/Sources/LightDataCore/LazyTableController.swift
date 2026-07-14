@@ -85,6 +85,24 @@ public final class LazyTableController {
         refreshCount()
     }
 
+    /// Synchronously fetches a row-major block of the given columns (in the given
+    /// order) for clipboard export. Blocking by design — copy must never emit cached
+    /// placeholders — so callers cap the range (clipboard-scale, not table-scale).
+    /// Runs on the same serial queue as viewport fetches; returns nil on query failure.
+    public func fetchBlock(rows rowRange: Range<Int>, columns: [Int]) -> [[String]]? {
+        let cols = columns.filter { source.headers.indices.contains($0) }
+        guard !cols.isEmpty, !rowRange.isEmpty else { return [] }
+        let spec = self.spec
+        var result: [[String]]?
+        queue.sync {
+            guard let fetched = try? source.columns(cols, matching: spec, offset: rowRange.lowerBound, limit: rowRange.count) else { return }
+            result = (0..<fetched.rowCount).map { rowIndex in
+                cols.map { fetched.data[$0]?[rowIndex] ?? "" }
+            }
+        }
+        return result
+    }
+
     // MARK: - Internals
 
     private func normalized(_ columns: [Int]) -> [Int] {

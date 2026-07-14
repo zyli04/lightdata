@@ -4099,6 +4099,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func selectedTabDelimitedText() -> String {
         guard let tableDocument else { return "" }
+        if isLazy { return lazySelectedTabDelimitedText() }
         let selectedRows = tableView.selectedRowIndexes
         let selectedColumns = selectedDataVisibleColumns()
         guard !selectedRows.isEmpty else { return "" }
@@ -4120,6 +4121,50 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 cellString(visibleRow: visibleRow, columnIndex: columnIndex)
             }.joined(separator: "\t")
         }.joined(separator: "\n")
+    }
+
+    /// Copy is limited to this many rows in lazy (Parquet browse) mode: the data must
+    /// be fetched synchronously — never from the scroll cache, which would put literal
+    /// "…" placeholders on the clipboard for uncached rows.
+    private static let lazyCopyRowCap = 10_000
+
+    private func lazySelectedTabDelimitedText() -> String {
+        guard let lazyController else { return "" }
+        // Use selectionRange (the true selection): the native table selection is
+        // deliberately clamped to the visible window for huge lazy selections.
+        let selectedRows = selectionRange.rows
+        guard !selectedRows.isEmpty else { return "" }
+
+        guard selectedRows.count <= Self.lazyCopyRowCap else {
+            let alert = NSAlert()
+            alert.messageText = "Selection too large to copy"
+            alert.informativeText = "Copying is limited to \(Self.lazyCopyRowCap) rows while browsing large Parquet files. Select fewer rows."
+            alert.runModal()
+            return ""
+        }
+
+        let selectedColumns = selectedDataVisibleColumns()
+        let dataColumns: [Int]
+        if selectedColumns.isEmpty {
+            dataColumns = Array(lazyController.headers.indices)
+        } else {
+            dataColumns = selectedColumns.compactMap { visibleColumn -> Int? in
+                guard tableView.tableColumns.indices.contains(visibleColumn) else { return nil }
+                return Int(tableView.tableColumns[visibleColumn].identifier.rawValue)
+            }
+        }
+        guard !dataColumns.isEmpty else { return "" }
+
+        var lines: [String] = []
+        for range in selectedRows.rangeView {
+            guard let block = lazyController.fetchBlock(rows: range, columns: dataColumns) else {
+                // Query failed; never write partial/placeholder data to the clipboard.
+                NSSound.beep()
+                return ""
+            }
+            lines += block.map { $0.joined(separator: "\t") }
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func captureMetadata() {
