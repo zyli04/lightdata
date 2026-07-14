@@ -10,6 +10,11 @@ options:
 packages:
   LightDataCore:
     path: LightDataCore
+  # Same repo LightDataCore already depends on (SPM dedupes); referenced directly so
+  # the app tests can generate Parquet fixtures.
+  duckdb-swift:
+    url: https://github.com/duckdb/duckdb-swift
+    from: "1.0.0"
 
 targets:
   LightData:
@@ -37,3 +42,37 @@ targets:
         INFOPLIST_KEY_NSHighResolutionCapable: YES
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Automatic
+
+  # Integration tests hosted INSIDE the real app process: they drive actual
+  # MainWindowController instances (real windows, real undo stack, real files)
+  # so regressions in editing/undo/close flows are caught without manual testing.
+  LightDataAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - AppTests
+    dependencies:
+      - target: LightData
+      - package: LightDataCore
+        product: LightDataCore
+      - package: duckdb-swift
+        product: DuckDB
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/LightData.app/Contents/MacOS/LightData
+        BUNDLE_LOADER: $(TEST_HOST)
+        CODE_SIGN_STYLE: Automatic
+
+schemes:
+  LightData:
+    build:
+      targets:
+        LightData: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - LightDataAppTests

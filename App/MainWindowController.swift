@@ -997,14 +997,19 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableDocument != nil
     }
 
-    private var tableDocument: TableDocument?
+    var tableDocument: TableDocument?
     private var visibleRows: [Int] = []
     private var activeFilter: TableFilter?
-    private var metadata = ViewMetadata()
-    private var schema = TableSchema()
-    private var editLocked = true
+    var metadata = ViewMetadata()
+    var schema = TableSchema()
+    var editLocked = true
     private var documentColumnOrderDirty = false
-    private let documentUndoManager = UndoManager()
+    let documentUndoManager = UndoManager()
+    /// Seams for modal UI and external side effects, injectable so the hosted
+    /// integration tests can drive flows that would otherwise block on runModal or
+    /// open a browser. Production behavior is the default value.
+    var presentAlert: (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
+    var openExternalURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
     /// Set while programmatically restoring sort from metadata to avoid double-undo
     /// registration or prematurely writing the restored sort back to metadata.
     private var suppressSortPersistence = false
@@ -1012,14 +1017,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var metadataPersistWorkItem: DispatchWorkItem?
 
     private let rootView = DropView()
-    private let tableView = DataTableView()
+    let tableView = DataTableView()
     private let scrollView = NSScrollView()
-    private let selectionOverlayView = SelectionOverlayView()
+    let selectionOverlayView = SelectionOverlayView()
     /// The vertical grid line after the last column, positioned by frame via
     /// updateTrailingGridLine(). During a column-resize drag no notification fires, so
     /// DataTableHeaderView polls headerDragTick() to keep it (and the selection overlay)
     /// tracking the live column geometry.
-    private let trailingGridLine = NSView()
+    let trailingGridLine = NSView()
     private lazy var rowDropIndicator: NSView = {
         let view = NSView()
         view.wantsLayer = true
@@ -1031,7 +1036,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let statusLabel = NSTextField(labelWithString: "")
     private let statusBadge = NSVisualEffectView()
     private let fileLabel = NSTextField(labelWithString: "No file")
-    private let columnPopup = NSPopUpButton()
+    let columnPopup = NSPopUpButton()
     private let operatorPopup = NSPopUpButton()
     private let filterValueField = NSTextField()
     private let delimiterPopup = NSPopUpButton()
@@ -1047,9 +1052,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var contextColumnIndex: Int?
     private var selectionMode = TableSelectionMode.cells
     private var selectionRange = TableSelectionRange()
-    private var activeTextSelectionView: CellTextSelectionOverlay?
+    var activeTextSelectionView: CellTextSelectionOverlay?
     private weak var activeTextSelectionSource: DataTextCellView?
-    private var activeCellEditor: InlineCellEditor?
+    var activeCellEditor: InlineCellEditor?
     private weak var activeCellEditorSource: (any InlineEditableCellView)?
     private var didBuildInterface = false
     private var appearanceRefreshScheduled = false
@@ -1847,7 +1852,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
               url.scheme?.hasPrefix("http") == true else {
             return false
         }
-        NSWorkspace.shared.open(url)
+        openExternalURL(url)
         return true
     }
 
@@ -1963,7 +1968,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Don't Save")
 
-        switch alert.runModal() {
+        switch presentAlert(alert) {
         case .alertFirstButtonReturn:
             saveDocument()
             // Save can fail (encoding, external change alert, …); only close if it
@@ -2426,7 +2431,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     /// Inverse of performUndoableInsertColumn: captures the column's current contents so
     /// redo restores any values typed into it between the add and the undo.
-    private func performUndoableDeleteColumn(at index: Int, actionName: String) {
+    func performUndoableDeleteColumn(at index: Int, actionName: String) {
         guard let doc = tableDocument, !doc.readOnly, doc.headers.indices.contains(index),
               doc.headers.count > 1 else { return }   // deleteColumn refuses the last column; don't register a bogus undo
         let name = doc.headers[index]
@@ -2632,14 +2637,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         alert.addButton(withTitle: "Rename")
         alert.addButton(withTitle: "Cancel")
 
-        if alert.runModal() == .alertFirstButtonReturn {
+        if presentAlert(alert) == .alertFirstButtonReturn {
             performUndoableRenameColumn(at: columnIndex, to: input.stringValue, actionName: "Rename Column")
         }
     }
 
     /// Renames a column, migrating its name-keyed schema/width/order metadata and
     /// registering the inverse rename for undo.
-    private func performUndoableRenameColumn(at columnIndex: Int, to newName: String, actionName: String) {
+    func performUndoableRenameColumn(at columnIndex: Int, to newName: String, actionName: String) {
         guard let doc = tableDocument, !doc.readOnly, doc.headers.indices.contains(columnIndex) else { return }
         let oldHeader = doc.headers[columnIndex]
         tableDocument?.renameColumn(at: columnIndex, to: newName)
@@ -2661,9 +2666,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         if let orderIndex = metadata.columnOrder.firstIndex(of: oldHeader) {
             metadata.columnOrder[orderIndex] = updatedHeader
         }
-        if metadata.sortColumnName == oldHeader {
-            metadata.sortColumnName = updatedHeader
-        }
+        // sortColumnName intentionally NOT migrated here: columnListChanged →
+        // persistViewMetadata re-derives it from the live sort descriptor (which is
+        // index-based and unaffected by a rename), so it lands on the new name.
         columnListChanged()
     }
 
@@ -3533,7 +3538,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return item
     }
 
-    private func buildColumns() {
+    func buildColumns() {
         tableView.tableColumns.forEach { tableView.removeTableColumn($0) }
         guard let tableDocument else { return }
 
@@ -3615,7 +3620,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
-    private func rebuildVisibleRows() {
+    func rebuildVisibleRows() {
         removeActiveTextSelectionView()
         removeActiveCellEditor(commit: true)
         if isLazy {
@@ -4097,7 +4102,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return IndexSet(integersIn: lower..<(upper + 1))
     }
 
-    private func selectedTabDelimitedText() -> String {
+    func selectedTabDelimitedText() -> String {
         guard let tableDocument else { return "" }
         if isLazy { return lazySelectedTabDelimitedText() }
         let selectedRows = tableView.selectedRowIndexes
@@ -4139,7 +4144,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             let alert = NSAlert()
             alert.messageText = "Selection too large to copy"
             alert.informativeText = "Copying is limited to \(Self.lazyCopyRowCap) rows while browsing large Parquet files. Select fewer rows."
-            alert.runModal()
+            _ = presentAlert(alert)
             return ""
         }
 
@@ -4388,7 +4393,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func showError(_ error: Error) {
         let alert = NSAlert(error: error)
-        alert.runModal()
+        _ = presentAlert(alert)
     }
 
     private func firstSupportedFileURL(from pasteboard: NSPasteboard) -> URL? {

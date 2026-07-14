@@ -7,25 +7,51 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		10DBDB0A74CE808EBECDCA9D /* LazyModeIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 181F529F9CD7E69E5A62E759 /* LazyModeIntegrationTests.swift */; };
 		307789C4FE7234FFEB37A096 /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F866C5CA553C080802C1509 /* MainWindowController.swift */; };
 		60CCC6B87C56B6DE9902BF8A /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC09CAF6AB6289074CDB41F /* main.swift */; };
 		6A70D802374BD6F4B0A688CA /* LightDataCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5B5FB3443157D824E60CE674 /* LightDataCore */; };
 		78208DF33F33591482846635 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9776EBFE0E04CBB6CA9FE3C0 /* AppDelegate.swift */; };
+		8A3EF3D9B1098EE0BA7D777D /* MainWindowControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61382B618E7269DB65BF4201 /* MainWindowControllerTests.swift */; };
 		A05AD76E18D8D410C651A838 /* SupportedFileType.swift in Sources */ = {isa = PBXBuildFile; fileRef = A05514AB80A4A45B5973E623 /* SupportedFileType.swift */; };
+		A62507B7D4C8D8F626F49541 /* DuckDB in Frameworks */ = {isa = PBXBuildFile; productRef = 6C0047BB6C10FB5452286257 /* DuckDB */; };
 		C244ED102A39362CA121745D /* LightDATA.icon in Resources */ = {isa = PBXBuildFile; fileRef = CAC1615B0D953112C80D9EAC /* LightDATA.icon */; };
+		D0F93852F9733EB6E8AD7EBC /* LightDataCore in Frameworks */ = {isa = PBXBuildFile; productRef = CD38671CF435B46FD5CAA7D4 /* LightDataCore */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		5CC9FB2EFC42D6E4F352399C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 263E533F04DA814861BD9571 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 918C68B8D47CBA1D09916CD5;
+			remoteInfo = LightData;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		181F529F9CD7E69E5A62E759 /* LazyModeIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LazyModeIntegrationTests.swift; sourceTree = "<group>"; };
 		2352C49A580906A6866723DB /* LightData.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LightData.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		556D9F9E535075F74F1ABA3A /* LightDataCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = LightDataCore; path = LightDataCore; sourceTree = SOURCE_ROOT; };
 		5DC09CAF6AB6289074CDB41F /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		61382B618E7269DB65BF4201 /* MainWindowControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowControllerTests.swift; sourceTree = "<group>"; };
 		9776EBFE0E04CBB6CA9FE3C0 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		9F866C5CA553C080802C1509 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
 		A05514AB80A4A45B5973E623 /* SupportedFileType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupportedFileType.swift; sourceTree = "<group>"; };
+		C9F807B4405CBDAD98838846 /* LightDataAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LightDataAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CAC1615B0D953112C80D9EAC /* LightDATA.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = LightDATA.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		A56EDDDD15A2D0CC4CA8AD5D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D0F93852F9733EB6E8AD7EBC /* LightDataCore in Frameworks */,
+				A62507B7D4C8D8F626F49541 /* DuckDB in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F77A8427E802B4328001FD1C /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -37,6 +63,15 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		666724DD8DA5BB5E5AAD5386 /* AppTests */ = {
+			isa = PBXGroup;
+			children = (
+				181F529F9CD7E69E5A62E759 /* LazyModeIntegrationTests.swift */,
+				61382B618E7269DB65BF4201 /* MainWindowControllerTests.swift */,
+			);
+			path = AppTests;
+			sourceTree = "<group>";
+		};
 		79FD7CB20DDDB69D878E516A /* Packages */ = {
 			isa = PBXGroup;
 			children = (
@@ -49,6 +84,7 @@
 			isa = PBXGroup;
 			children = (
 				FCB917C69E65DD3EC04AFBEF /* App */,
+				666724DD8DA5BB5E5AAD5386 /* AppTests */,
 				79FD7CB20DDDB69D878E516A /* Packages */,
 				CAC1615B0D953112C80D9EAC /* LightDATA.icon */,
 				EFEBD5908A383FA46835E8EF /* Products */,
@@ -59,6 +95,7 @@
 			isa = PBXGroup;
 			children = (
 				2352C49A580906A6866723DB /* LightData.app */,
+				C9F807B4405CBDAD98838846 /* LightDataAppTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -97,6 +134,27 @@
 			productReference = 2352C49A580906A6866723DB /* LightData.app */;
 			productType = "com.apple.product-type.application";
 		};
+		F1121825BC11397B93BC74DF /* LightDataAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 82BA0D5D3C3A5C49B9D2409C /* Build configuration list for PBXNativeTarget "LightDataAppTests" */;
+			buildPhases = (
+				7D327EDBC2663868BC397411 /* Sources */,
+				A56EDDDD15A2D0CC4CA8AD5D /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				88464F14CED05C5069C8B1D9 /* PBXTargetDependency */,
+			);
+			name = LightDataAppTests;
+			packageProductDependencies = (
+				CD38671CF435B46FD5CAA7D4 /* LightDataCore */,
+				6C0047BB6C10FB5452286257 /* DuckDB */,
+			);
+			productName = LightDataAppTests;
+			productReference = C9F807B4405CBDAD98838846 /* LightDataAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -107,6 +165,9 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					918C68B8D47CBA1D09916CD5 = {
+						ProvisioningStyle = Automatic;
+					};
+					F1121825BC11397B93BC74DF = {
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -121,6 +182,7 @@
 			mainGroup = C95FFB80AC76177CB781AB4A;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				339B4479F7576D7C0AB37C33 /* XCRemoteSwiftPackageReference "duckdb-swift" */,
 				F4BD4518E882CC9CD0A51F81 /* XCLocalSwiftPackageReference "LightDataCore" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -129,6 +191,7 @@
 			projectRoot = "";
 			targets = (
 				918C68B8D47CBA1D09916CD5 /* LightData */,
+				F1121825BC11397B93BC74DF /* LightDataAppTests */,
 			);
 		};
 /* End PBXProject section */
@@ -156,7 +219,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7D327EDBC2663868BC397411 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				10DBDB0A74CE808EBECDCA9D /* LazyModeIntegrationTests.swift in Sources */,
+				8A3EF3D9B1098EE0BA7D777D /* MainWindowControllerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		88464F14CED05C5069C8B1D9 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 918C68B8D47CBA1D09916CD5 /* LightData */;
+			targetProxy = 5CC9FB2EFC42D6E4F352399C /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		505FC52F9ABC61C633D7DBF9 /* Debug */ = {
@@ -179,6 +259,25 @@
 				PRODUCT_NAME = LightData;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		5D167638F83FC8E3912D3A81 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zyli.LightDataAppTests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LightData.app/Contents/MacOS/LightData";
 			};
 			name = Debug;
 		};
@@ -268,6 +367,25 @@
 			};
 			name = Debug;
 		};
+		C00E804AA11A81CBD7031EF4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zyli.LightDataAppTests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LightData.app/Contents/MacOS/LightData";
+			};
+			name = Release;
+		};
 		DED7F41C27BEFE4F149454F4 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -336,6 +454,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		82BA0D5D3C3A5C49B9D2409C /* Build configuration list for PBXNativeTarget "LightDataAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5D167638F83FC8E3912D3A81 /* Debug */,
+				C00E804AA11A81CBD7031EF4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		96FFA3DFA539286D4F8B75C5 /* Build configuration list for PBXNativeTarget "LightData" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -354,8 +481,28 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		339B4479F7576D7C0AB37C33 /* XCRemoteSwiftPackageReference "duckdb-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/duckdb/duckdb-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		5B5FB3443157D824E60CE674 /* LightDataCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LightDataCore;
+		};
+		6C0047BB6C10FB5452286257 /* DuckDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 339B4479F7576D7C0AB37C33 /* XCRemoteSwiftPackageReference "duckdb-swift" */;
+			productName = DuckDB;
+		};
+		CD38671CF435B46FD5CAA7D4 /* LightDataCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = LightDataCore;
 		};
