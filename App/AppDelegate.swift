@@ -38,6 +38,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// ⌘Q must not silently discard unsaved edits: give each dirty window the same
+    /// Save / Don't Save / Cancel prompt it gets on ⌘W.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for controller in windowControllers {
+            controller.window?.makeKeyAndOrderFront(nil)
+            if !controller.confirmDiscardingUnsavedChanges() {
+                return .terminateCancel
+            }
+        }
+        return .terminateNow
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             showWindow()

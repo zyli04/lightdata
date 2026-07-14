@@ -426,6 +426,19 @@ protocol InlineCellEditorHandling: AnyObject {
 final class InlineCellEditor: NSTextView {
     weak var editHandler: InlineCellEditorHandling?
     var commitsChanges = false
+    /// Commit coordinates, snapshotted when the editor opens. Commit must NOT read
+    /// these off the (weak) source cell view: table reloads recycle cell views, so by
+    /// commit time the source may represent a different cell (writing the value into
+    /// the wrong row/column) or be deallocated (stranding a zombie editor).
+    var documentRow = 0
+    var columnIndex = 0
+    var originalRawValue = ""
+    /// Private undo manager so editing keystrokes don't pollute the document's undo
+    /// stack via the window's undoManager (those entries would target the deallocated
+    /// editor after commit).
+    private let editingUndoManager = UndoManager()
+
+    override var undoManager: UndoManager? { editingUndoManager }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -1931,6 +1944,38 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         onClose?(self)
     }
 
+    /// Prompt before discarding unsaved edits on ⌘W / window close. Runs the alert as
+    /// a modal (not a sheet) so the synchronous return value can veto the close.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        endActiveCellTextInteraction(commit: true)
+        return confirmDiscardingUnsavedChanges()
+    }
+
+    /// True when it's safe to close: no unsaved edits, the user saved them here, or
+    /// the user explicitly chose to discard them.
+    func confirmDiscardingUnsavedChanges() -> Bool {
+        guard let tableDocument, tableDocument.dirty, !tableDocument.readOnly else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = "Save changes to \(tableDocument.url.lastPathComponent)?"
+        alert.informativeText = "Your edits will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Don't Save")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            saveDocument()
+            // Save can fail (encoding, external change alert, …); only close if it
+            // actually cleared the dirty flag.
+            return self.tableDocument?.dirty != true
+        case .alertThirdButtonReturn:
+            return true
+        default:
+            return false
+        }
+    }
+
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
         documentUndoManager
     }
@@ -2178,6 +2223,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
+    func menuDidClose(_ menu: NSMenu) {
+        // Clear on the next turn (menu actions fire after menuDidClose); a stale
+        // index would otherwise outlive column deletions and crash rename/delete.
+        DispatchQueue.main.async { [weak self] in
+            self?.contextColumnIndex = nil
+        }
+    }
+
     func setContextColumnFromVisibleColumn(_ visibleColumn: Int) {
         guard visibleColumn >= 0,
               tableView.tableColumns.indices.contains(visibleColumn) else {
@@ -2374,7 +2427,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     /// Inverse of performUndoableInsertColumn: captures the column's current contents so
     /// redo restores any values typed into it between the add and the undo.
     private func performUndoableDeleteColumn(at index: Int, actionName: String) {
-        guard let doc = tableDocument, !doc.readOnly, doc.headers.indices.contains(index) else { return }
+        guard let doc = tableDocument, !doc.readOnly, doc.headers.indices.contains(index),
+              doc.headers.count > 1 else { return }   // deleteColumn refuses the last column; don't register a bogus undo
         let name = doc.headers[index]
         let values = doc.rows.map { index < $0.count ? $0[index] : "" }
         documentUndoManager.registerUndo(withTarget: self) { target in
@@ -2564,7 +2618,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     @objc func renameColumnClicked(_ sender: Any?) {
         guard isEditingEnabled,
               let columnIndex = columnIndex(from: sender),
-              let tableDocument else {
+              let tableDocument,
+              tableDocument.headers.indices.contains(columnIndex) else {
             return
         }
 
@@ -2578,41 +2633,51 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         alert.addButton(withTitle: "Cancel")
 
         if alert.runModal() == .alertFirstButtonReturn {
-            let oldHeader = tableDocument.headers[columnIndex]
-            let oldSchema = schema.schema(for: oldHeader)
-            self.tableDocument?.renameColumn(at: columnIndex, to: input.stringValue)
-            if let updatedHeader = self.tableDocument?.headers[columnIndex] {
-                schema.columns.removeValue(forKey: oldHeader)
-                schema.columns[updatedHeader] = oldSchema
-                saveCurrentSchema()
-            }
-            // For a headerless file, the (display-only) names live in view memory, so
-            // persist the rename there since it isn't written to the data file.
-            if let doc = self.tableDocument, !doc.hasHeaderRow {
-                metadata.headerlessColumnNames = doc.headers
-                ViewMetadataStore.save(metadata, for: doc.url)
-            }
-            buildColumns()
-            refreshFilterControls()
-            rebuildVisibleRows()
-            updateStatus()
+            performUndoableRenameColumn(at: columnIndex, to: input.stringValue, actionName: "Rename Column")
         }
+    }
+
+    /// Renames a column, migrating its name-keyed schema/width/order metadata and
+    /// registering the inverse rename for undo.
+    private func performUndoableRenameColumn(at columnIndex: Int, to newName: String, actionName: String) {
+        guard let doc = tableDocument, !doc.readOnly, doc.headers.indices.contains(columnIndex) else { return }
+        let oldHeader = doc.headers[columnIndex]
+        tableDocument?.renameColumn(at: columnIndex, to: newName)
+        guard let updatedHeader = tableDocument?.headers[columnIndex], updatedHeader != oldHeader else { return }
+
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableRenameColumn(at: columnIndex, to: oldHeader, actionName: actionName)
+        }
+        documentUndoManager.setActionName(actionName)
+
+        // Migrate all name-keyed metadata to the new name.
+        if let oldSchema = schema.columns.removeValue(forKey: oldHeader) {
+            schema.columns[updatedHeader] = oldSchema
+        }
+        saveCurrentSchema()
+        if let width = metadata.columnWidths.removeValue(forKey: oldHeader) {
+            metadata.columnWidths[updatedHeader] = width
+        }
+        if let orderIndex = metadata.columnOrder.firstIndex(of: oldHeader) {
+            metadata.columnOrder[orderIndex] = updatedHeader
+        }
+        if metadata.sortColumnName == oldHeader {
+            metadata.sortColumnName = updatedHeader
+        }
+        columnListChanged()
     }
 
     @objc func deleteColumnClicked(_ sender: Any?) {
         guard isEditingEnabled,
-              let columnIndex = columnIndex(from: sender) else {
+              let columnIndex = columnIndex(from: sender),
+              let tableDocument,
+              tableDocument.headers.indices.contains(columnIndex) else {
             return
         }
-        tableDocument?.deleteColumn(at: columnIndex)
-        if let tableDocument {
-            schema.removeMissingColumns(validHeaders: tableDocument.headers)
-            saveCurrentSchema()
-        }
-        buildColumns()
-        refreshFilterControls()
-        rebuildVisibleRows()
-        updateStatus()
+        // Route through the undoable primitive (shared with Add Column's undo): the
+        // old direct-mutation path was not undoable AND left earlier index-keyed undo
+        // entries pointing at shifted columns.
+        performUndoableDeleteColumn(at: columnIndex, actionName: "Delete Column")
     }
 
     @objc func copy(_ sender: Any?) {
@@ -3375,6 +3440,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         setContextColumnFromVisibleColumn(visibleColumn)
         guard let columnIndex = contextColumnIndex else { return nil }
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(columnMenuItem(title: "Insert Column Before", action: #selector(insertColumnBeforeClicked(_:)), columnIndex: columnIndex))
         menu.addItem(columnMenuItem(title: "Insert Column After", action: #selector(insertColumnAfterClicked(_:)), columnIndex: columnIndex))
         menu.addItem(NSMenuItem.separator())
@@ -3865,6 +3931,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         editor.editHandler = self
         editor.delegate = self
         editor.commitsChanges = editable
+        // Snapshot the commit coordinates now — the source view may be recycled to a
+        // different cell (or freed) by any reload while the editor is open.
+        editor.documentRow = cell.documentRow
+        editor.columnIndex = cell.columnIndex
+        editor.originalRawValue = cell.rawValue
         editor.isRichText = false
         editor.importsGraphics = false
         editor.allowsUndo = true
@@ -3929,8 +4000,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func updateActiveCellEditorFrame() {
-        guard let editor = activeCellEditor,
-              let source = activeCellEditorSource else {
+        guard let editor = activeCellEditor else { return }
+        // Source recycled/detached by a reload while editing → the editor has no cell
+        // to anchor to anymore; commit what was typed rather than float at a stale
+        // position or glue onto whatever cell the view was recycled into (commit uses
+        // the coordinates snapshotted on the editor, so it still writes the right cell).
+        guard let source = activeCellEditorSource, source.superview != nil, source.window != nil,
+              source.documentRow == editor.documentRow, source.columnIndex == editor.columnIndex else {
+            commitActiveCellEditor(value: editor.string, editor: editor)
             return
         }
         editor.frame = source.convert(source.bounds, to: tableView).insetBy(dx: 1, dy: 2)
@@ -3968,44 +4045,42 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func commitActiveCellEditor() {
-        guard let editor = activeCellEditor,
-              let source = activeCellEditorSource else {
-            return
-        }
-        let newValue = editor.string
-        commitActiveCellEditor(value: newValue, editor: editor, source: source)
+        guard let editor = activeCellEditor else { return }
+        commitActiveCellEditor(value: editor.string, editor: editor)
     }
 
     private func commitActiveCellEditor(value newValue: String) {
-        guard let editor = activeCellEditor,
-              let source = activeCellEditorSource else {
-            return
-        }
-        commitActiveCellEditor(value: newValue, editor: editor, source: source)
+        guard let editor = activeCellEditor else { return }
+        commitActiveCellEditor(value: newValue, editor: editor)
     }
 
-    private func commitActiveCellEditor(value newValue: String, editor: InlineCellEditor, source: InlineEditableCellView) {
+    private func commitActiveCellEditor(value newValue: String, editor: InlineCellEditor) {
+        // Tear down FIRST, unconditionally — and write using the coordinates
+        // snapshotted on the editor at open time, never through the weak source view
+        // (a reload may have recycled it to represent a different cell, or freed it;
+        // both previously either stranded a zombie editor or wrote the wrong cell).
         editor.removeFromSuperview()
         activeCellEditor = nil
-        source.isHidden = false
+        activeCellEditorSource?.isHidden = false
         activeCellEditorSource = nil
         window?.makeFirstResponder(tableView)
 
         guard editor.commitsChanges else { return }
+        let columnIndex = editor.columnIndex
         // Enforce format-typed input while types are on: number/date columns reject
         // non-conforming text (empty is always allowed). url degrades; checkbox isn't
         // typed. The discarded edit leaves the cell at its previous value.
         if metadata.schemaEnabled, !isLazy, let tableDocument,
-           tableDocument.headers.indices.contains(source.columnIndex) {
-            let type = schema.schema(for: tableDocument.headers[source.columnIndex]).type
+           tableDocument.headers.indices.contains(columnIndex) {
+            let type = schema.schema(for: tableDocument.headers[columnIndex]).type
             if (type == .number || type == .date), !ColumnTypeValidator.matches(newValue, type: type) {
                 NSSound.beep()
                 return
             }
         }
-        let rawValue = rawValueForEditedText(newValue, columnIndex: source.columnIndex, rawValue: source.rawValue)
-        guard rawValue != source.rawValue else { return }
-        performUndoableCellValue(rawValue, documentRow: source.documentRow, column: source.columnIndex, actionName: "Edit Cell")
+        let rawValue = rawValueForEditedText(newValue, columnIndex: columnIndex, rawValue: editor.originalRawValue)
+        guard rawValue != editor.originalRawValue else { return }
+        performUndoableCellValue(rawValue, documentRow: editor.documentRow, column: columnIndex, actionName: "Edit Cell")
     }
 
     private func cancelActiveCellEditor() {
@@ -4154,6 +4229,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         metadata.headerlessColumnNames = doc.hasHeaderRow ? nil : doc.headers
         documentColumnOrderDirty = false
         buildColumns()
+        refreshFilterControls()   // filter column popup shows header names; keep in step
         rebuildVisibleRows()
         updateStatus()
         updateToolbarState()
@@ -4184,7 +4260,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         metadata.sortColumnName = nil
         metadata.sortAscending = true
         documentColumnOrderDirty = false
-        if isEditingEnabled { self.tableDocument?.dirty = false }
+        // Deliberately does NOT touch tableDocument.dirty: dirty may reflect real cell
+        // edits, and clearing it here would let a close discard them without a prompt.
         buildColumns()            // rebuilds at default width + original column order
         rebuildVisibleRows()
         updateHeaderSortState()
@@ -4277,7 +4354,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 continue
             }
             let ext = url.pathExtension.lowercased()
-            if ["csv", "tsv", "tab", "json", "jsonl", "ndjson", "xlsx", "parquet", "pq"].contains(ext) {
+            if ["csv", "tsv", "tab", "json", "jsonl", "ndjson", "xlsx", "xls", "parquet", "pq"].contains(ext) {
                 return url
             }
         }
