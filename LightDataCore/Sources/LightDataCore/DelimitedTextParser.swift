@@ -124,17 +124,30 @@ public enum DelimitedTextParser {
 
     private static func detectDelimiter(in text: String) -> Character {
         let candidates: [Character] = [",", "\t", ";", "|"]
-        let sample = String(text.prefix(16_384))
-        var best: (delimiter: Character, score: Int) = (",", -1)
+        // Sample by RECORDS, not bytes: a single huge quoted field (e.g. a social-media
+        // post body with embedded newlines) can exceed a byte window entirely, starving
+        // the correct delimiter of sample rows while a stray delimiter char inside that
+        // text produces many spurious fragments for a wrong one. We parse enough of the
+        // text to yield a stable number of records for each candidate.
+        let sample = String(text.prefix(256 * 1024))
+        var best: (delimiter: Character, score: Double) = (",", -1)
 
         for candidate in candidates {
-            let rows = parse(sample, delimiter: candidate).prefix(20).filter { !$0.isEmpty }
-            let columnCounts = rows.map(\.count).filter { $0 > 1 }
+            let rows = parse(sample, delimiter: candidate).prefix(50)
+            let columnCounts = rows.map(\.count)
             guard !columnCounts.isEmpty else { continue }
-            let mostCommonCount = columnCounts.reduce(into: [:]) { counts, value in
-                counts[value, default: 0] += 1
-            }.max { $0.value < $1.value }?.value ?? 0
-            let score = mostCommonCount * 100 + (columnCounts.max() ?? 0)
+
+            // The right delimiter yields MANY columns CONSISTENTLY. Score = modal column
+            // count × the fraction of rows that agree with it. A wrong delimiter that
+            // shatters text into ragged 1–2 column fragments scores low on both factors;
+            // one that produces a few stray 2-column rows loses to a delimiter giving a
+            // consistent 36 columns even when the latter has fewer sample rows.
+            let histogram = columnCounts.reduce(into: [:]) { $0[$1, default: 0] += 1 }
+            guard let (modalCount, modalFreq) = histogram.max(by: { $0.value < $1.value }),
+                  modalCount > 1 else { continue }
+            let consistency = Double(modalFreq) / Double(columnCounts.count)
+            let score = Double(modalCount) * consistency
+
             if score > best.score {
                 best = (candidate, score)
             }
