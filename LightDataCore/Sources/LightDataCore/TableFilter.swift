@@ -60,32 +60,50 @@ public enum TableQueryEngine {
         if let sortDescriptor,
            let key = sortDescriptor.key,
            let columnIndex = Int(key) {
-            indexes.sort { left, right in
-                let lhs = value(at: columnIndex, row: document.rows[left])
-                let rhs = value(at: columnIndex, row: document.rows[right])
-                // Empty cells always sink to the bottom, regardless of sort direction.
-                let lhsEmpty = lhs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                let rhsEmpty = rhs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                if lhsEmpty != rhsEmpty { return rhsEmpty }
-                if lhsEmpty && rhsEmpty { return false }
-                let result = compare(lhs, rhs)
-                return sortDescriptor.ascending ? result == .orderedAscending : result == .orderedDescending
-            }
+            indexes = sorted(indexes, by: columnIndex, ascending: sortDescriptor.ascending, in: document)
         }
 
         return indexes
     }
 
-    private static func value(at columnIndex: Int, row: [String]) -> String {
-        columnIndex < row.count ? row[columnIndex] : ""
+    /// Sorts row indices by one column with a stable, transitive ordering.
+    ///
+    /// The whole column commits to a SINGLE comparison domain — numeric only if every
+    /// non-empty value parses as a finite Double, otherwise string — so the order is a
+    /// proper strict-weak-ordering (mixing per-pair numeric/string comparisons produces
+    /// cycles). Keys are precomputed once per row instead of parsed on every compare.
+    private static func sorted(_ indexes: [Int], by columnIndex: Int, ascending: Bool, in document: TableDocument) -> [Int] {
+        let values = indexes.map { value(at: columnIndex, row: document.rows[$0]) }
+        let trimmed = values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        let numeric = trimmed.allSatisfy { $0.isEmpty || Double($0).map { $0.isFinite } == true }
+        // Precompute a sort key per row index (parse/normalize once, not per comparison).
+        var keys: [Int: (empty: Bool, number: Double, text: String)] = [:]
+        keys.reserveCapacity(indexes.count)
+        for (position, rowIndex) in indexes.enumerated() {
+            let t = trimmed[position]
+            keys[rowIndex] = (t.isEmpty, numeric ? (Double(t) ?? 0) : 0, values[position])
+        }
+
+        return indexes.sorted { lhs, rhs in
+            let a = keys[lhs]!
+            let b = keys[rhs]!
+            // Empty cells always sink to the bottom, regardless of direction.
+            if a.empty != b.empty { return b.empty }
+            if a.empty && b.empty { return lhs < rhs }   // stable tie-break
+            let result: ComparisonResult
+            if numeric {
+                result = a.number < b.number ? .orderedAscending
+                    : a.number > b.number ? .orderedDescending : .orderedSame
+            } else {
+                result = a.text.localizedStandardCompare(b.text)
+            }
+            if result == .orderedSame { return lhs < rhs }  // stable tie-break
+            return ascending ? result == .orderedAscending : result == .orderedDescending
+        }
     }
 
-    private static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
-        if let leftNumber = Double(lhs), let rightNumber = Double(rhs) {
-            if leftNumber < rightNumber { return .orderedAscending }
-            if leftNumber > rightNumber { return .orderedDescending }
-            return .orderedSame
-        }
-        return lhs.localizedStandardCompare(rhs)
+    private static func value(at columnIndex: Int, row: [String]) -> String {
+        columnIndex < row.count ? row[columnIndex] : ""
     }
 }

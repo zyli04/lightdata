@@ -298,8 +298,11 @@ public struct TableDocument {
     public mutating func renameColumn(at index: Int, to newName: String) {
         guard !readOnly, headers.indices.contains(index) else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        headers[index] = trimmed.isEmpty ? "Column \(index + 1)" : trimmed
-        headers = makeUnique(headers)
+        let base = trimmed.isEmpty ? "Column \(index + 1)" : trimmed
+        // Unique-ify ONLY the renamed column against the others. Re-running makeUnique
+        // over the whole array would instead rename the *other* colliding column,
+        // silently detaching its schema/width metadata.
+        headers[index] = Self.uniqueName(base, among: headers, excludingIndex: index)
         dirty = true
     }
 
@@ -319,8 +322,8 @@ public struct TableDocument {
         guard !readOnly else { return }
         let clamped = min(max(index, 0), headers.count)
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        headers.insert(trimmed.isEmpty ? "Column \(clamped + 1)" : trimmed, at: clamped)
-        headers = makeUnique(headers)
+        let base = trimmed.isEmpty ? "Column \(clamped + 1)" : trimmed
+        headers.insert(Self.uniqueName(base, among: headers, excludingIndex: nil), at: clamped)
         for rowIndex in rows.indices {
             // Rows can be ragged (shorter than headers); pad so the insert lands at the
             // intended position.
@@ -402,6 +405,15 @@ public struct TableDocument {
     /// Designed as the single export entry point so it can later be backed by a
     /// streaming DuckDB `COPY` for very large datasets instead of the in-memory rows.
     public func write(to targetURL: URL, as targetFormat: TableFileFormat) throws {
+        // A lazy (header-only) document's rows live behind a paged source, not in
+        // memory — serializing `rows` here would silently write an EMPTY file while
+        // looking like a successful conversion. Refuse until export streams from the
+        // lazy source (planned DuckDB COPY).
+        if readOnly, rows.isEmpty {
+            throw TableDocumentError.saveUnsupported(
+                "Exporting this \(format.displayName) file isn't supported yet — its rows are paged on demand and aren't all in memory."
+            )
+        }
         let encoding = openInfo.encoding ?? .utf8
         let lineEnding = openInfo.lineEnding ?? .lf
         switch targetFormat {
@@ -430,6 +442,19 @@ public struct TableDocument {
 
     private static func modificationDate(for url: URL) -> Date? {
         try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+    }
+
+    /// Returns `base`, or `base 2`/`base 3`/… if it collides with any header other than
+    /// the one at `excludingIndex`. Used so a single rename/insert only adjusts its own
+    /// name, never the colliding column's.
+    static func uniqueName(_ base: String, among headers: [String], excludingIndex: Int?) -> String {
+        let others = Set(headers.enumerated().compactMap { index, name in
+            index == excludingIndex ? nil : name
+        })
+        guard others.contains(base) else { return base }
+        var suffix = 2
+        while others.contains("\(base) \(suffix)") { suffix += 1 }
+        return "\(base) \(suffix)"
     }
 }
 

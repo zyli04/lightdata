@@ -3,9 +3,53 @@ import Foundation
 
 public enum MetadataLocation {
     static func centralizedURL(for fileURL: URL, kind: String) -> URL {
-        updateIndex(for: fileURL)
+        let identity = resolveIdentity(for: fileURL)
+        updateIndex(for: fileURL, identity: identity)
         return metadataDirectory()
-            .appendingPathComponent(fileIdentity(for: fileURL) + ".\(kind).json")
+            .appendingPathComponent(identity + ".\(kind).json")
+    }
+
+    /// Resolves the metadata identity for a file, keyed PRIMARILY BY PATH.
+    ///
+    /// Path-primary (not inode-primary) is deliberate: saving rewrites the file with a
+    /// fresh inode on APFS (AtomicFileWriter/replaceItemAt), so an inode-keyed identity
+    /// would orphan all view/schema metadata on every single save. The path is stable
+    /// across an in-place save.
+    ///
+    /// To survive rename/move (where the path changes but the file is "the same"), we
+    /// migrate: if no record exists for the current path, look through the index for a
+    /// record whose stored security-scoped bookmark now resolves to this same path, and
+    /// rename its metadata files onto the new path identity.
+    private static func resolveIdentity(for fileURL: URL) -> String {
+        let identity = pathIdentity(for: fileURL)
+        let metaExists = FileManager.default.fileExists(atPath: metadataURL(identity: identity, kind: "views").path)
+            || FileManager.default.fileExists(atPath: metadataURL(identity: identity, kind: "schema").path)
+        if metaExists { return identity }
+        migrateFromMovedFile(to: fileURL, newIdentity: identity)
+        return identity
+    }
+
+    /// If some indexed record's bookmark resolves to `fileURL` (the file was renamed or
+    /// moved), rename that record's metadata files onto the new path identity so the
+    /// remembered view state follows the file.
+    private static func migrateFromMovedFile(to fileURL: URL, newIdentity: String) {
+        let index = loadIndex()
+        let fm = FileManager.default
+        let targetPath = fileURL.standardizedFileURL.path
+        for (oldIdentity, record) in index.files where oldIdentity != newIdentity {
+            guard let b64 = record.bookmarkBase64, let data = Data(base64Encoded: b64) else { continue }
+            var stale = false
+            guard let resolved = try? URL(resolvingBookmarkData: data, options: .withoutUI, bookmarkDataIsStale: &stale),
+                  resolved.standardizedFileURL.path == targetPath else { continue }
+            for kind in ["views", "schema"] {
+                let from = metadataURL(identity: oldIdentity, kind: kind)
+                let to = metadataURL(identity: newIdentity, kind: kind)
+                guard fm.fileExists(atPath: from.path) else { continue }
+                try? fm.removeItem(at: to)
+                try? fm.moveItem(at: from, to: to)
+            }
+            return
+        }
     }
 
     static func ensureMetadataDirectory() throws {
@@ -49,19 +93,27 @@ public enum MetadataLocation {
         metadataDirectory().appendingPathComponent("\(identity).\(kind).json")
     }
 
-    private static func updateIndex(for fileURL: URL) {
+    private static func updateIndex(for fileURL: URL, identity: String) {
         do {
             try ensureMetadataDirectory()
             var index = loadIndex()
-            let identity = fileIdentity(for: fileURL)
             let bookmark = try? fileURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-            index.files[identity] = MetadataFileRecord(
+            let record = MetadataFileRecord(
                 id: identity,
                 fileName: fileURL.lastPathComponent,
                 lastKnownPath: fileURL.standardizedFileURL.path,
                 bookmarkBase64: bookmark?.base64EncodedString(),
                 updatedAt: ISO8601DateFormatter().string(from: Date())
             )
+            // Skip the disk write when nothing but the timestamp would change —
+            // centralizedURL runs on every metadata load/save, so this path is hot.
+            if let existing = index.files[identity],
+               existing.fileName == record.fileName,
+               existing.lastKnownPath == record.lastKnownPath,
+               existing.bookmarkBase64 == record.bookmarkBase64 {
+                return
+            }
+            index.files[identity] = record
             saveIndex(index)
         } catch {
             NSLog("LightData metadata index update failed: \(error.localizedDescription)")
@@ -76,20 +128,8 @@ public enum MetadataLocation {
             .appendingPathComponent("Metadata", isDirectory: true)
     }
 
-    private static func fileIdentity(for fileURL: URL) -> String {
-        if let resourceID = resourceIdentifier(for: fileURL) {
-            return "resource-" + sha256(resourceID)
-        }
-        let path = fileURL.standardizedFileURL.path
-        return "path-" + sha256(path)
-    }
-
-    private static func resourceIdentifier(for fileURL: URL) -> String? {
-        guard let values = try? fileURL.resourceValues(forKeys: [.fileResourceIdentifierKey]),
-              let identifier = values.fileResourceIdentifier else {
-            return nil
-        }
-        return String(describing: identifier)
+    private static func pathIdentity(for fileURL: URL) -> String {
+        "path-" + sha256(fileURL.standardizedFileURL.path)
     }
 
     private static func sha256(_ value: String) -> String {

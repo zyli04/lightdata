@@ -22,6 +22,13 @@ public enum DelimitedTextParser {
             if names.allSatisfy({ $0.isEmpty }) {
                 names = (0..<records[0].count).map { "Column \($0 + 1)" }
             }
+            // Size headers to the widest record so data rows wider than the header row
+            // aren't truncated (and silently lost on the next save); synthesize names
+            // for the extra columns.
+            let widest = records.map(\.count).max() ?? names.count
+            if widest > names.count {
+                names += (names.count..<widest).map { "Column \($0 + 1)" }
+            }
             headers = makeUnique(names)
             dataRecords = records.dropFirst()
         } else {
@@ -103,7 +110,10 @@ public enum DelimitedTextParser {
             records.append(record)
         }
 
-        return records.filter { !$0.allSatisfy(\.isEmpty) }
+        // Drop only blank *lines* (a single empty field, i.e. no delimiter was seen),
+        // not legitimate all-empty rows like ",,," which carry real (empty) columns and
+        // must survive a load/save round-trip.
+        return records.filter { $0.count > 1 || $0.first?.isEmpty == false }
     }
 
     private static func escape(_ value: String, delimiter: Character) -> String {

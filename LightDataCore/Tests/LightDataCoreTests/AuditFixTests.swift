@@ -1,0 +1,157 @@
+import XCTest
+@testable import LightDataCore
+
+/// Tests for the 2026-07 audit fixes in the core layer: ragged/empty-row load
+/// fidelity, rename collision isolation, lazy-shell export refusal, sort ordering,
+/// and metadata identity surviving a save.
+final class AuditFixTests: XCTestCase {
+    private var tempDir: URL!
+
+    override func setUpWithError() throws {
+        tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lightdata-audit-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    // MARK: - DelimitedTextParser: ragged rows are not truncated
+
+    func testRowsWiderThanHeaderWidenTheTable() throws {
+        let url = tempDir.appendingPathComponent("ragged.csv")
+        try Data("a,b,c\n1,2,3,4,5\n6,7,8\n".utf8).write(to: url)
+        let doc = try TableDocument.load(url: url)
+        XCTAssertEqual(doc.headers, ["a", "b", "c", "Column 4", "Column 5"])
+        XCTAssertEqual(doc.rows[0], ["1", "2", "3", "4", "5"], "wide row must not be truncated")
+        XCTAssertEqual(doc.rows[1], ["6", "7", "8", "", ""])
+    }
+
+    // MARK: - DelimitedTextParser: all-empty rows survive, blank lines are skipped
+
+    func testAllEmptyRowSurvivesRoundTripButBlankLineIsSkipped() throws {
+        let url = tempDir.appendingPathComponent("empties.csv")
+        try Data("a,b,c\n,,\n\n1,2,3\n".utf8).write(to: url)
+        var doc = try TableDocument.load(url: url)
+        XCTAssertEqual(doc.rows.count, 2, "',,' row kept; blank line dropped")
+        XCTAssertEqual(doc.rows[0], ["", "", ""])
+        XCTAssertEqual(doc.rows[1], ["1", "2", "3"])
+
+        try doc.save()
+        let reloaded = try TableDocument.load(url: url)
+        XCTAssertEqual(reloaded.rows, doc.rows, "empty row must survive save/reload")
+    }
+
+    // MARK: - renameColumn: collision only affects the renamed column
+
+    func testRenameCollisionDoesNotRenameOtherColumn() throws {
+        let url = tempDir.appendingPathComponent("rename.csv")
+        try Data("Age,Name\n1,x\n".utf8).write(to: url)
+        var doc = try TableDocument.load(url: url)
+        doc.renameColumn(at: 0, to: "Name")
+        XCTAssertEqual(doc.headers[1], "Name", "existing column must keep its name")
+        XCTAssertEqual(doc.headers[0], "Name 2", "renamed column takes the suffix")
+    }
+
+    func testRenameToItselfIsStable() throws {
+        let url = tempDir.appendingPathComponent("rename2.csv")
+        try Data("a,b\n1,2\n".utf8).write(to: url)
+        var doc = try TableDocument.load(url: url)
+        doc.renameColumn(at: 0, to: "a")
+        XCTAssertEqual(doc.headers, ["a", "b"], "renaming a column to its own name is a no-op")
+    }
+
+    // MARK: - write(to:): lazy header-only shell must refuse to export
+
+    func testLazyShellExportThrowsInsteadOfWritingEmptyFile() {
+        let doc = TableDocument.lazyHeaderOnly(
+            url: tempDir.appendingPathComponent("big.parquet"),
+            format: .parquet,
+            headers: ["a", "b"],
+            readOnlyReason: "test"
+        )
+        let target = tempDir.appendingPathComponent("out.csv")
+        XCTAssertThrowsError(try doc.write(to: target, as: .csv))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path), "no empty file may be left behind")
+    }
+
+    // MARK: - Sort: single comparison domain, transitive, empties last, stable
+
+    private func makeDoc(column: [String]) throws -> TableDocument {
+        let url = tempDir.appendingPathComponent("sort-\(UUID().uuidString).csv")
+        let body = column.map { $0.isEmpty ? "" : $0 }.joined(separator: "\n")
+        try Data(("v\n" + body + "\n").utf8).write(to: url)
+        return try TableDocument.load(url: url)
+    }
+
+    private func sortedValues(_ values: [String], ascending: Bool) throws -> [String] {
+        let doc = try makeDoc(column: values)
+        let indexes = TableQueryEngine.visibleRows(
+            in: doc, search: "", filter: nil,
+            sortDescriptor: NSSortDescriptor(key: "0", ascending: ascending)
+        )
+        return indexes.map { doc.rows[$0][0] }
+    }
+
+    func testMixedColumnSortsInOneStringDomain() throws {
+        // The old per-pair comparator had cycles here ("1e3" < "5x" < "20" < "1e3"
+        // via numeric pairs). A mixed column must use string ordering for ALL values;
+        // localizedStandardCompare is Finder-style (embedded numbers compare
+        // numerically: 1 < 5 < 20) and is a single transitive domain.
+        let sorted = try sortedValues(["5x", "1e3", "20"], ascending: true)
+        XCTAssertEqual(sorted, ["1e3", "5x", "20"], "one consistent string domain for a mixed column")
+    }
+
+    func testAllNumericColumnSortsNumerically() throws {
+        let sorted = try sortedValues(["10", "9", "1e3", "-2"], ascending: true)
+        XCTAssertEqual(sorted, ["-2", "9", "10", "1e3"], "numeric domain: 1e3 sorts as 1000")
+    }
+
+    func testEmptiesSinkToBottomInBothDirections() throws {
+        // Two columns: in 1-column CSV an empty row IS a blank line (and is skipped);
+        // here the sort column is empty while the id column keeps the row alive.
+        let url = tempDir.appendingPathComponent("sort-empty.csv")
+        try Data("v,id\nb,1\n,2\na,3\n".utf8).write(to: url)
+        let doc = try TableDocument.load(url: url)
+        for ascending in [true, false] {
+            let indexes = TableQueryEngine.visibleRows(
+                in: doc, search: "", filter: nil,
+                sortDescriptor: NSSortDescriptor(key: "0", ascending: ascending)
+            )
+            let sorted = indexes.map { doc.rows[$0][0] }
+            XCTAssertEqual(sorted.last, "", "empty sinks to bottom (ascending=\(ascending))")
+            XCTAssertEqual(sorted.dropLast(), ascending ? ["a", "b"] : ["b", "a"])
+        }
+    }
+
+    func testNaNValueDoesNotPoisonNumericDomain() throws {
+        // "nan" parses as Double.nan (not finite) → column must use the string domain,
+        // avoiding NaN's non-transitive numeric comparisons. Finder-style compare puts
+        // "2" before "10" (embedded numbers), then "nan".
+        let sorted = try sortedValues(["nan", "2", "10"], ascending: true)
+        XCTAssertEqual(sorted, ["2", "10", "nan"], "string domain because of nan")
+    }
+
+    // MARK: - Save preserves metadata identity (path-keyed, inode-agnostic)
+
+    func testViewMetadataSurvivesSave() throws {
+        let url = tempDir.appendingPathComponent("meta.csv")
+        try Data("a,b\n1,2\n".utf8).write(to: url)
+
+        var metadata = ViewMetadata()
+        metadata.columnWidths = ["a": 321]
+        ViewMetadataStore.save(metadata, for: url)
+        XCTAssertEqual(ViewMetadataStore.load(for: url).columnWidths["a"], 321)
+
+        // Save rewrites the file (new inode on APFS). Metadata must still resolve.
+        var doc = try TableDocument.load(url: url)
+        doc.setValue("9", row: 0, column: 0)
+        try doc.save()
+
+        XCTAssertEqual(
+            ViewMetadataStore.load(for: url).columnWidths["a"], 321,
+            "view metadata must survive an in-place save (path-keyed identity)"
+        )
+    }
+}
