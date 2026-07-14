@@ -159,6 +159,9 @@ public struct TableDocument {
     /// (headerless delimited file), the headers are synthetic placeholders and are NOT
     /// written back on save. Always true for JSON/JSONL/XLSX/Parquet (intrinsic names).
     public var hasHeaderRow: Bool = true
+    /// True for lazy header-only shells whose rows are paged on demand (rows stays
+    /// empty); guards paths that would otherwise treat "no rows in memory" as "no data".
+    public var isLazyShell: Bool = false
 
     public var rowCount: Int { rows.count }
     public var columnCount: Int { headers.count }
@@ -168,7 +171,7 @@ public struct TableDocument {
     /// served on demand by a `DuckDBTableSource` rather than held in `rows`. Reuses the
     /// same model so UI code can keep reading url/format/headers/openInfo uniformly.
     public static func lazyHeaderOnly(url: URL, format: TableFileFormat, headers: [String], readOnlyReason: String) -> TableDocument {
-        TableDocument(
+        var doc = TableDocument(
             url: url,
             format: format,
             headers: headers,
@@ -177,6 +180,8 @@ public struct TableDocument {
             openInfo: FileOpenInfo(encoding: nil, lineEnding: nil, delimiter: .none, readOnlyReason: readOnlyReason),
             loadedModificationDate: modificationDate(for: url)
         )
+        doc.isLazyShell = true
+        return doc
     }
 
     /// Default columns/rows for a freshly created blank document.
@@ -208,20 +213,20 @@ public struct TableDocument {
         switch ext {
         case "csv":
             let table = try delimiterOverride.map { try DelimitedTextParser.read(url: url, delimiter: $0, firstRowIsHeader: firstRowIsHeader) } ?? DelimitedTextParser.readAuto(url: url, firstRowIsHeader: firstRowIsHeader)
-            var doc = TableDocument(url: url, format: .csv, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            var doc = TableDocument(url: url, format: .csv, headers: table.headers, rows: table.rows, readOnly: table.openInfo.readOnlyReason != nil, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
             doc.hasHeaderRow = firstRowIsHeader
             return doc
         case "tsv", "tab":
             let table = try DelimitedTextParser.read(url: url, delimiter: delimiterOverride ?? "\t", firstRowIsHeader: firstRowIsHeader)
-            var doc = TableDocument(url: url, format: .tsv, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            var doc = TableDocument(url: url, format: .tsv, headers: table.headers, rows: table.rows, readOnly: table.openInfo.readOnlyReason != nil, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
             doc.hasHeaderRow = firstRowIsHeader
             return doc
         case "json":
             let table = try JSONTableParser.readJSON(url: url)
-            return TableDocument(url: url, format: .json, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            return TableDocument(url: url, format: .json, headers: table.headers, rows: table.rows, readOnly: table.openInfo.readOnlyReason != nil, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
         case "jsonl", "ndjson":
             let table = try JSONTableParser.readJSONLines(url: url)
-            return TableDocument(url: url, format: .jsonl, headers: table.headers, rows: table.rows, readOnly: false, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
+            return TableDocument(url: url, format: .jsonl, headers: table.headers, rows: table.rows, readOnly: table.openInfo.readOnlyReason != nil, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
         case "xlsx":
             let table = try XLSXReader.readFirstSheet(url: url, firstRowIsHeader: firstRowIsHeader)
             var doc = TableDocument(url: url, format: .xlsx, headers: table.headers, rows: table.rows, readOnly: true, sheetName: table.sheetName, openInfo: table.openInfo, loadedModificationDate: modificationDate(for: url))
@@ -374,7 +379,7 @@ public struct TableDocument {
 
     public mutating func save() throws {
         guard !readOnly else {
-            throw TableDocumentError.saveUnsupported("\(format.displayName) is read-only in this MVP.")
+            throw TableDocumentError.saveUnsupported(openInfo.readOnlyReason ?? "\(format.displayName) is read-only in this MVP.")
         }
         try ensureFileWasNotChangedExternally()
 
@@ -409,7 +414,7 @@ public struct TableDocument {
         // memory — serializing `rows` here would silently write an EMPTY file while
         // looking like a successful conversion. Refuse until export streams from the
         // lazy source (planned DuckDB COPY).
-        if readOnly, rows.isEmpty {
+        if isLazyShell {
             throw TableDocumentError.saveUnsupported(
                 "Exporting this \(format.displayName) file isn't supported yet — its rows are paged on demand and aren't all in memory."
             )

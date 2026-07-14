@@ -154,4 +154,76 @@ final class AuditFixTests: XCTestCase {
             "view metadata must survive an in-place save (path-keyed identity)"
         )
     }
+
+    // MARK: - Encoding: unrepresentable text throws instead of silent UTF-8 rewrite
+
+    func testLatin1UnrepresentableCharacterThrowsOnSave() throws {
+        let url = tempDir.appendingPathComponent("latin1.csv")
+        // é in Latin-1 (0xE9) after invalid-UTF-8 lead: forces the Latin-1 branch.
+        try Data([UInt8]("a,b\nx,".utf8) + [0xE9] + [UInt8]("\n".utf8)).write(to: url)
+        var doc = try TableDocument.load(url: url)
+        XCTAssertEqual(doc.openInfo.encoding, .latin1)
+        XCTAssertFalse(doc.readOnly)
+
+        let original = try Data(contentsOf: url)
+        doc.setValue("→", row: 0, column: 0)   // not representable in Latin-1
+        XCTAssertThrowsError(try doc.save()) { error in
+            XCTAssertTrue(error is EncodingUnrepresentableError)
+        }
+        XCTAssertEqual(try Data(contentsOf: url), original, "file must be untouched after a failed save")
+    }
+
+    // MARK: - UTF-16 detection: decodes for viewing, opens read-only
+
+    func testUTF16LEWithBOMDecodesReadOnly() throws {
+        let url = tempDir.appendingPathComponent("utf16.csv")
+        let text = "a,b\n1,héllo\n"
+        var data = Data([0xFF, 0xFE])
+        data.append(contentsOf: text.data(using: .utf16LittleEndian)!)
+        try data.write(to: url)
+
+        let doc = try TableDocument.load(url: url)
+        XCTAssertTrue(doc.readOnly, "UTF-16 must open read-only (writer can't emit it)")
+        XCTAssertEqual(doc.headers, ["a", "b"])
+        XCTAssertEqual(doc.rows, [["1", "héllo"]], "content decodes correctly, not as NUL mojibake")
+    }
+
+    func testBOMlessUTF16IsDetectedNotMojibake() throws {
+        let url = tempDir.appendingPathComponent("utf16-nobom.tsv")
+        let text = "name\tvalue\nalpha\t1\nbeta\t2\n"
+        try text.data(using: .utf16LittleEndian)!.write(to: url)
+
+        let doc = try TableDocument.load(url: url)
+        XCTAssertTrue(doc.readOnly)
+        XCTAssertEqual(doc.headers, ["name", "value"])
+        XCTAssertEqual(doc.rows.first, ["alpha", "1"])
+    }
+
+    // MARK: - JSON: lossy content opens read-only; flat string JSON stays editable
+
+    func testJSONWithNumbersOpensReadOnly() throws {
+        let url = tempDir.appendingPathComponent("typed.json")
+        try Data(#"[{"a": {"b": 1}, "n": null}]"#.utf8).write(to: url)
+        let doc = try TableDocument.load(url: url)
+        XCTAssertTrue(doc.readOnly, "nested/numeric/null JSON must open read-only")
+        XCTAssertNotNil(doc.openInfo.readOnlyReason)
+    }
+
+    func testFlatStringJSONStaysEditable() throws {
+        let url = tempDir.appendingPathComponent("flat.json")
+        try Data(#"[{"a": "1", "b": "x"}, {"a": "2", "b": "y"}]"#.utf8).write(to: url)
+        var doc = try TableDocument.load(url: url)
+        XCTAssertFalse(doc.readOnly, "flat all-string JSON round-trips faithfully; stays editable")
+        doc.setValue("3", row: 0, column: 0)
+        try doc.save()
+        let reloaded = try TableDocument.load(url: url)
+        XCTAssertEqual(reloaded.rows[0][0], "3")
+    }
+
+    func testJSONLWithBooleanOpensReadOnly() throws {
+        let url = tempDir.appendingPathComponent("typed.jsonl")
+        try Data("{\"a\": \"x\"}\n{\"a\": true}\n".utf8).write(to: url)
+        let doc = try TableDocument.load(url: url)
+        XCTAssertTrue(doc.readOnly)
+    }
 }

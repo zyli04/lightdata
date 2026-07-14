@@ -7,7 +7,7 @@ enum JSONTableParser {
         let value = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
         guard let array = value as? [Any] else { throw TableDocumentError.invalidJSON }
         var parsed = try table(from: array)
-        parsed.openInfo = FileOpenInfo(encoding: decoded.encoding, lineEnding: decoded.lineEnding, delimiter: .none, readOnlyReason: nil)
+        parsed.openInfo = FileOpenInfo(encoding: decoded.encoding, lineEnding: decoded.lineEnding, delimiter: .none, readOnlyReason: lossyReason(for: array))
         return parsed
     }
 
@@ -21,15 +21,32 @@ enum JSONTableParser {
                 return try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
             }
         var parsed = try table(from: records)
-        parsed.openInfo = FileOpenInfo(encoding: decoded.encoding, lineEnding: decoded.lineEnding, delimiter: .none, readOnlyReason: nil)
+        parsed.openInfo = FileOpenInfo(encoding: decoded.encoding, lineEnding: decoded.lineEnding, delimiter: .none, readOnlyReason: lossyReason(for: records))
         return parsed
+    }
+
+    /// Our writer emits flat objects of string values, so a save is only faithful when
+    /// the source was already exactly that. Anything else — nested objects (flattened
+    /// to dot-paths), arrays, numbers/booleans (stringified), or nulls (→ "") — would be
+    /// silently destroyed on save, so such files open read-only until a type-preserving
+    /// writer exists.
+    private static func lossyReason(for array: [Any]) -> String? {
+        for element in array {
+            guard let object = element as? [String: Any] else {
+                return "Contains non-object entries (read-only; edits would change the file's structure)"
+            }
+            for value in object.values where !(value is String) {
+                return "Contains nested values, numbers, or nulls (read-only; editing would change their types)"
+            }
+        }
+        return nil
     }
 
     static func writeJSON(url: URL, headers: [String], rows: [[String]], encoding: TextEncodingKind, lineEnding: LineEnding) throws {
         let objects = objectsFromRows(headers: headers, rows: rows)
         let data = try JSONSerialization.data(withJSONObject: objects, options: [.prettyPrinted, .sortedKeys])
         let text = String(data: data, encoding: .utf8) ?? "[]"
-        try AtomicFileWriter.write(FileTextDecoder.encode(normalizeLineEndings(text, to: lineEnding), encoding: encoding), to: url)
+        try AtomicFileWriter.write(try FileTextDecoder.encode(normalizeLineEndings(text, to: lineEnding), encoding: encoding), to: url)
     }
 
     static func writeJSONLines(url: URL, headers: [String], rows: [[String]], encoding: TextEncodingKind, lineEnding: LineEnding) throws {
@@ -38,7 +55,7 @@ enum JSONTableParser {
             let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             return String(data: data, encoding: .utf8) ?? "{}"
         }.joined(separator: lineEnding.stringValue) + lineEnding.stringValue
-        try AtomicFileWriter.write(FileTextDecoder.encode(lines, encoding: encoding), to: url)
+        try AtomicFileWriter.write(try FileTextDecoder.encode(lines, encoding: encoding), to: url)
     }
 
     private static func table(from array: [Any]) throws -> ParsedTable {

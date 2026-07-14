@@ -49,7 +49,7 @@ public enum DelimitedTextParser {
                 encoding: decoded.encoding,
                 lineEnding: decoded.lineEnding,
                 delimiter: DelimiterKind(character: delimiter),
-                readOnlyReason: nil
+                readOnlyReason: decoded.readOnlyReason
             )
         )
     }
@@ -60,7 +60,7 @@ public enum DelimitedTextParser {
         let output = allRows.map { record in
             record.map { escape($0, delimiter: delimiter) }.joined(separator: String(delimiter))
         }.joined(separator: lineEnding.stringValue) + lineEnding.stringValue
-        try AtomicFileWriter.write(FileTextDecoder.encode(output, encoding: encoding), to: url)
+        try AtomicFileWriter.write(try FileTextDecoder.encode(output, encoding: encoding), to: url)
     }
 
     public static func parse(_ text: String, delimiter: Character) -> [[String]] {
