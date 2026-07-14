@@ -87,7 +87,15 @@ private enum OLE2 {
         let firstMiniFATSector = Int(readU32(bytes, 60))
         let firstDIFATSector = Int(readU32(bytes, 68))
         let numDIFATSectors = Int(readU32(bytes, 72))
-        guard sectorSize >= 512, miniSectorSize >= 1 else { throw XLSReaderError.notOLE2 }
+        // Every count/size below comes from the (untrusted) file and is validated
+        // before it drives an allocation or a loop bound. Per MS-CFB the sector size
+        // is 512 (v3) or 4096 (v4) and the mini sector size is 64 — a crafted shift
+        // like 34 would otherwise make sectorSize drive multi-GB reserves and
+        // overflowing offset multiplies.
+        guard sectorSize == 512 || sectorSize == 4096, miniSectorSize == 64 else {
+            throw XLSReaderError.notOLE2
+        }
+        let totalSectors = bytes.count / sectorSize
 
         func sectorRange(_ s: Int) -> Range<Int> {
             let off = (s + 1) * sectorSize
@@ -101,8 +109,14 @@ private enum OLE2 {
             if v != freeSect && v != endOfChain { fatSectors.append(Int(v)) }
         }
         var difat = firstDIFATSector
-        var difatGuard = 0
-        while difat != Int(endOfChain), difat != Int(freeSect), difatGuard < numDIFATSectors + 1 {
+        // Cap the walk by what the file can physically hold (not only the file's own
+        // declared numDIFATSectors) and track visited sectors: a self-referential
+        // DIFAT chain must terminate, not loop for ~4 billion iterations.
+        var visitedDIFAT = Set<Int>()
+        let difatCap = min(numDIFATSectors, totalSectors)
+        while difat != Int(endOfChain), difat != Int(freeSect),
+              difat >= 0, difat < totalSectors,
+              visitedDIFAT.count <= difatCap, visitedDIFAT.insert(difat).inserted {
             let range = sectorRange(difat)
             let entries = sectorSize / 4
             for i in 0..<(entries - 1) {
@@ -110,8 +124,10 @@ private enum OLE2 {
                 if v != freeSect && v != endOfChain { fatSectors.append(Int(v)) }
             }
             difat = Int(readU32(bytes, range.lowerBound + (entries - 1) * 4))
-            difatGuard += 1
         }
+        // A FAT sector number beyond the file is garbage; drop it so it can't inflate
+        // the reserve below.
+        fatSectors = fatSectors.filter { $0 >= 0 && $0 < totalSectors }
 
         // Build the flat FAT.
         var fat: [UInt32] = []
@@ -350,7 +366,11 @@ private enum BIFF {
         guard blob.count >= 8 else { return [] }
 
         var pos = 8 // skip cstTotal (u32) + cstUnique (u32)
-        let unique = Int(readU32(blob, 4))
+        // cstUnique comes from the file; clamp it before it drives an allocation
+        // (0xFFFFFFFF would reserve tens of GB). Each string needs ≥ 3 bytes, so
+        // blob.count/3 bounds what the data can actually hold; the per-iteration
+        // guard still ends the loop early on truncated data.
+        let unique = min(Int(readU32(blob, 4)), blob.count / 3)
         var result: [String] = []
         result.reserveCapacity(unique)
 

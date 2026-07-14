@@ -23,8 +23,9 @@ enum XLSXReader {
         try extractZip(url, to: tempRoot)
 
         let sharedStrings = parseSharedStrings(at: tempRoot.appendingPathComponent("xl/sharedStrings.xml"))
-        let sheetName = parseFirstSheetName(at: tempRoot.appendingPathComponent("xl/workbook.xml"))
-        let sheetURL = findFirstWorksheet(in: tempRoot)
+        let workbook = parseWorkbook(at: tempRoot.appendingPathComponent("xl/workbook.xml"))
+        let sheetName = workbook?.name
+        let sheetURL = findFirstWorksheet(in: tempRoot, relationshipId: workbook?.relationshipId)
         guard let sheetURL else { throw XLSXReaderError.missingWorksheet }
 
         let sheet = try parseWorksheet(at: sheetURL, sharedStrings: sharedStrings)
@@ -74,7 +75,26 @@ enum XLSXReader {
         guard process.terminationStatus == 0 else { throw XLSXReaderError.extractionFailed }
     }
 
-    private static func findFirstWorksheet(in root: URL) -> URL? {
+    /// Locates the workbook's FIRST worksheet part. The workbook lists sheets in
+    /// logical order with an r:id each; resolving that through workbook.xml.rels is the
+    /// only correct mapping (sheet order ≠ file naming: the first sheet can live in
+    /// sheet3.xml, and lexical fallback would visit sheet10.xml before sheet2.xml).
+    private static func findFirstWorksheet(in root: URL, relationshipId: String?) -> URL? {
+        if let relationshipId,
+           let target = parseRelationshipTarget(
+               at: root.appendingPathComponent("xl/_rels/workbook.xml.rels"),
+               relationshipId: relationshipId
+           ) {
+            // Targets are relative to xl/ (e.g. "worksheets/sheet3.xml").
+            let resolved = root.appendingPathComponent("xl").appendingPathComponent(target).standardizedFileURL
+            // The target comes from the (untrusted) archive; never let ../ escape the
+            // extraction root.
+            if resolved.path.hasPrefix(root.standardizedFileURL.path),
+               FileManager.default.fileExists(atPath: resolved.path) {
+                return resolved
+            }
+        }
+
         let worksheets = root.appendingPathComponent("xl/worksheets")
         let sheet1 = worksheets.appendingPathComponent("sheet1.xml")
         if FileManager.default.fileExists(atPath: sheet1.path) {
@@ -83,8 +103,19 @@ enum XLSXReader {
         return try? FileManager.default
             .contentsOfDirectory(at: worksheets, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "xml" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             .first
+    }
+
+    private static func parseRelationshipTarget(at url: URL, relationshipId: String) -> String? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let parser = XMLParser(contentsOf: url) else {
+            return nil
+        }
+        let delegate = RelationshipsDelegate(relationshipId: relationshipId)
+        parser.delegate = delegate
+        parser.parse()
+        return delegate.target
     }
 
     private static func parseSharedStrings(at url: URL) -> [String] {
@@ -98,7 +129,7 @@ enum XLSXReader {
         return delegate.strings
     }
 
-    private static func parseFirstSheetName(at url: URL) -> String? {
+    private static func parseWorkbook(at url: URL) -> (name: String?, relationshipId: String?)? {
         guard FileManager.default.fileExists(atPath: url.path),
               let parser = XMLParser(contentsOf: url) else {
             return nil
@@ -106,7 +137,8 @@ enum XLSXReader {
         let delegate = WorkbookDelegate()
         parser.delegate = delegate
         parser.parse()
-        return delegate.firstSheetName
+        guard delegate.firstSheetName != nil || delegate.firstSheetRelationshipId != nil else { return nil }
+        return (delegate.firstSheetName, delegate.firstSheetRelationshipId)
     }
 
     private static func parseWorksheet(at url: URL, sharedStrings: [String]) throws -> [Int: [Int: String]] {
@@ -153,10 +185,27 @@ private final class SharedStringsDelegate: NSObject, XMLParserDelegate {
 
 private final class WorkbookDelegate: NSObject, XMLParserDelegate {
     var firstSheetName: String?
+    var firstSheetRelationshipId: String?
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
-        if elementName == "sheet", firstSheetName == nil {
+        if elementName == "sheet", firstSheetName == nil, firstSheetRelationshipId == nil {
             firstSheetName = attributeDict["name"]
+            firstSheetRelationshipId = attributeDict["r:id"] ?? attributeDict["id"]
+        }
+    }
+}
+
+private final class RelationshipsDelegate: NSObject, XMLParserDelegate {
+    private let relationshipId: String
+    var target: String?
+
+    init(relationshipId: String) {
+        self.relationshipId = relationshipId
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        if elementName == "Relationship", attributeDict["Id"] == relationshipId {
+            target = attributeDict["Target"]
         }
     }
 }
@@ -227,13 +276,20 @@ private final class WorksheetDelegate: NSObject, XMLParserDelegate {
     private func cellPosition(from reference: String) -> (row: Int, column: Int)? {
         let letters = reference.prefix { $0.isLetter }
         let digits = reference.drop { $0.isLetter }.prefix { $0.isNumber }
-        guard let row = Int(digits), !letters.isEmpty else { return nil }
+        // Max real column is "XFD" (3 letters); a longer run can't be valid and a
+        // 14+ letter one would overflow the base-26 accumulation below.
+        guard let row = Int(digits), !letters.isEmpty, letters.count <= 3 else { return nil }
 
         var column = 0
         for scalar in String(letters).uppercased().unicodeScalars {
+            guard scalar >= "A", scalar <= "Z" else { return nil }
             let value = Int(scalar.value) - Int(UnicodeScalar("A").value) + 1
             column = column * 26 + value
         }
+        // XLSX caps at XFD (16384 columns) and 1,048,576 rows. The materialization
+        // step builds DENSE 0...maxColumn arrays, so a crafted ref like "ZZZZZZZZ"
+        // (≈ 2×10¹¹) would otherwise drive an instant OOM. Reject out-of-spec refs.
+        guard column <= 16384, row >= 1, row <= 1_048_576 else { return nil }
         return (row: row, column: column - 1)
     }
 }
