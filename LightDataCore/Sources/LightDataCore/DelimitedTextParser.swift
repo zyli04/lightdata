@@ -212,18 +212,17 @@ public enum DelimitedTextParser {
         for candidate in candidates {
             let rows = parse(sample, delimiter: candidate).prefix(50)
             let columnCounts = rows.map(\.count)
-            guard !columnCounts.isEmpty else { continue }
+            guard let anchor = columnCounts.first, anchor > 1 else { continue }
 
-            // The right delimiter yields MANY columns CONSISTENTLY. Score = modal column
-            // count × the fraction of rows that agree with it. A wrong delimiter that
-            // shatters text into ragged 1–2 column fragments scores low on both factors;
-            // one that produces a few stray 2-column rows loses to a delimiter giving a
-            // consistent 36 columns even when the latter has fewer sample rows.
-            let histogram = columnCounts.reduce(into: [:]) { $0[$1, default: 0] += 1 }
-            guard let (modalCount, modalFreq) = histogram.max(by: { $0.value < $1.value }),
-                  modalCount > 1 else { continue }
-            let consistency = Double(modalFreq) / Double(columnCounts.count)
-            let score = Double(modalCount) * consistency
+            // The real delimiter must split EVERY record — anchored on the first one
+            // (the header). Score = first-record column count × the fraction of rows
+            // agreeing with it. This rejects both failure modes we've hit:
+            // a stray char inside one huge text field (splits fragments, but not the
+            // first record), and a ";"-joined list column (splits data rows ~28 wide
+            // very consistently, but the header row not at all).
+            let agreeing = columnCounts.filter { $0 == anchor }.count
+            let consistency = Double(agreeing) / Double(columnCounts.count)
+            let score = Double(anchor) * consistency
 
             if score > best.score {
                 best = (candidate, score)

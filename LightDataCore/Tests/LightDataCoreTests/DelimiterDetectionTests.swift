@@ -64,6 +64,27 @@ final class DelimiterDetectionTests: XCTestCase {
         XCTAssertEqual(doc.headers, ["a", "b", "c"])
     }
 
+    /// A comma CSV where one column is a semicolon-joined LIST ("a;b;c;…" × ~27 per
+    /// row, highly consistent). A consistency-only score picks ';' — but the header
+    /// row contains no semicolons at all; the real delimiter must split the first
+    /// record too.
+    func testSemicolonJoinedListColumnDoesNotDefeatComma() throws {
+        var csv = "username,common_count,followed_by\n"
+        for i in 1...40 {
+            let list = (0..<27).map { "user\($0)_\(i)" }.joined(separator: ";")
+            csv += "account\(i),\(27),\(list)\n"
+        }
+        let url = tempDir.appendingPathComponent("kol.csv")
+        try Data(csv.utf8).write(to: url)
+
+        let doc = try TableDocument.load(url: url)
+        XCTAssertEqual(doc.headers, ["username", "common_count", "followed_by"],
+                       "comma must win even though ';' splits data rows more consistently")
+        XCTAssertEqual(doc.rows.count, 40)
+        XCTAssertEqual(doc.rows[0][0], "account1")
+        XCTAssertTrue(doc.rows[0][2].hasPrefix("user0_1;user1_1"), "the list stays one cell")
+    }
+
     /// A plain comma file with short rows keeps working.
     func testPlainCommaDetection() throws {
         let url = tempDir.appendingPathComponent("plain.csv")
