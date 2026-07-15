@@ -199,7 +199,12 @@ public enum DelimitedTextParser {
         return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
-    private static func detectDelimiter(in text: String) -> Character {
+    /// Picks the most plausible delimiter. `preferred` is the file-extension default
+    /// (comma for .csv — the "C" in the name, matching Excel): it wins any ambiguity,
+    /// and a challenger must be DECISIVELY better (>1.5× score) to override it. That
+    /// conservatism kills a whole class of misdetections where content inside fields
+    /// (joined lists, prose) happens to split "nicely" by another character.
+    private static func detectDelimiter(in text: String, preferred: Character = ",") -> Character {
         let candidates: [Character] = [",", "\t", ";", "|"]
         // Sample by RECORDS, not bytes: a single huge quoted field (e.g. a social-media
         // post body with embedded newlines) can exceed a byte window entirely, starving
@@ -207,7 +212,7 @@ public enum DelimitedTextParser {
         // text produces many spurious fragments for a wrong one. We parse enough of the
         // text to yield a stable number of records for each candidate.
         let sample = String(text.prefix(256 * 1024))
-        var best: (delimiter: Character, score: Double) = (",", -1)
+        var scores: [Character: Double] = [:]
 
         for candidate in candidates {
             let rows = parse(sample, delimiter: candidate).prefix(50)
@@ -221,15 +226,17 @@ public enum DelimitedTextParser {
             // first record), and a ";"-joined list column (splits data rows ~28 wide
             // very consistently, but the header row not at all).
             let agreeing = columnCounts.filter { $0 == anchor }.count
-            let consistency = Double(agreeing) / Double(columnCounts.count)
-            let score = Double(anchor) * consistency
-
-            if score > best.score {
-                best = (candidate, score)
-            }
+            scores[candidate] = Double(anchor) * (Double(agreeing) / Double(columnCounts.count))
         }
 
-        return best.delimiter
+        guard let bestChallenger = scores.filter({ $0.key != preferred }).max(by: { $0.value < $1.value }) else {
+            return preferred
+        }
+        let preferredScore = scores[preferred] ?? 0
+        if preferredScore > 0 {
+            return bestChallenger.value > preferredScore * 1.5 ? bestChallenger.key : preferred
+        }
+        return bestChallenger.key
     }
 }
 

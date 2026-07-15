@@ -85,6 +85,24 @@ final class DelimiterDetectionTests: XCTestCase {
         XCTAssertTrue(doc.rows[0][2].hasPrefix("user0_1;user1_1"), "the list stays one cell")
     }
 
+    /// Genuinely ambiguous file (both ',' and ';' split every record consistently):
+    /// for a .csv the extension default must hold unless a challenger is DECISIVELY
+    /// better — Excel semantics ("c" means comma), no coin flips.
+    func testAmbiguousFilePrefersCommaForCSV() throws {
+        var csv = "alpha;beta;gamma,delta\n"
+        for i in 1...20 {
+            csv += "x\(i);y\(i);z\(i),v\(i)\n"
+        }
+        // ';' splits every line into 3 fields (score 3.0); ',' into 2 (score 2.0).
+        // Neither is decisive → comma must win on the .csv prior.
+        let url = tempDir.appendingPathComponent("ambiguous.csv")
+        try Data(csv.utf8).write(to: url)
+
+        let doc = try TableDocument.load(url: url)
+        XCTAssertEqual(doc.headers, ["alpha;beta;gamma", "delta"],
+                       "ambiguity resolves to the extension default (comma)")
+    }
+
     /// A plain comma file with short rows keeps working.
     func testPlainCommaDetection() throws {
         let url = tempDir.appendingPathComponent("plain.csv")
