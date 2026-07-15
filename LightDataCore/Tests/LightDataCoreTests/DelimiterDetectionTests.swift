@@ -73,3 +73,58 @@ final class DelimiterDetectionTests: XCTestCase {
         XCTAssertEqual(doc.rows.count, 2)
     }
 }
+
+/// Pins the exact semantics of DelimitedTextParser.parse before/after performance
+/// work: quoting, escaped quotes, embedded newlines, CR/CRLF normalization, emoji,
+/// and trailing-newline handling must not change.
+final class ParseSemanticsTests: XCTestCase {
+    private func parse(_ text: String, delimiter: Character = ",") -> [[String]] {
+        DelimitedTextParser.parse(text, delimiter: delimiter)
+    }
+
+    func testEscapedQuotesInsideQuotedField() {
+        XCTAssertEqual(parse("a,\"he said \"\"hi\"\"\",c\n"),
+                       [["a", "he said \"hi\"", "c"]])
+    }
+
+    func testEmbeddedNewlineAndCRLFInsideQuotes() {
+        XCTAssertEqual(parse("a,\"line1\nline2\",z\n"),
+                       [["a", "line1\nline2", "z"]])
+        // CRLF inside quotes normalizes to LF
+        XCTAssertEqual(parse("a,\"line1\r\nline2\",z\r\n"),
+                       [["a", "line1\nline2", "z"]])
+    }
+
+    func testCRAndCRLFRecordSeparators() {
+        XCTAssertEqual(parse("a,b\r\nc,d\r\n"), [["a", "b"], ["c", "d"]])
+        XCTAssertEqual(parse("a,b\rc,d\r"), [["a", "b"], ["c", "d"]])
+    }
+
+    func testQuoteAppearingMidFieldIsLiteral() {
+        // A quote NOT at field start is data, not a quoting toggle.
+        XCTAssertEqual(parse("say \"hi\",b\n"), [["say \"hi\"", "b"]])
+    }
+
+    func testEmojiAndMultiScalarGraphemes() {
+        XCTAssertEqual(parse("👩‍👩‍👧‍👦,\"🇨🇳 flag\",ok\n"),
+                       [["👩‍👩‍👧‍👦", "🇨🇳 flag", "ok"]])
+    }
+
+    func testNoTrailingNewlineLastRecordKept() {
+        XCTAssertEqual(parse("a,b\nc,d"), [["a", "b"], ["c", "d"]])
+    }
+
+    func testBlankLineDroppedButEmptyColumnsRowKept() {
+        XCTAssertEqual(parse("a,b\n\n,\n"), [["a", "b"], ["", ""]])
+    }
+
+    func testUnterminatedQuoteConsumesRest() {
+        XCTAssertEqual(parse("a,\"unclosed\nstill inside"),
+                       [["a", "unclosed\nstill inside"]])
+    }
+
+    func testQuotedFieldFollowedByText() {
+        // Content after the closing quote (nonstandard) is appended literally.
+        XCTAssertEqual(parse("\"x\"tail,b\n"), [["xtail", "b"]])
+    }
+}

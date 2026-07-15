@@ -64,6 +64,86 @@ public enum DelimitedTextParser {
     }
 
     public static func parse(_ text: String, delimiter: Character) -> [[String]] {
+        // Single-pass byte scan. The previous implementation materialized three full
+        // copies of the input (two replacingOccurrences passes for CR/CRLF plus an
+        // Array(Character) grapheme array), which took ~1.2s and ~500MB peak for a
+        // 23MB file; CSV syntax is pure ASCII (",\"\r\n), so we scan UTF-8 bytes and
+        // slice field text out losslessly, normalizing line endings in-state.
+        let bytes = Array(text.utf8)
+        let delimiterBytes = Array(String(delimiter).utf8)
+        // Multi-byte delimiters (exotic) fall back on the slow path below.
+        guard delimiterBytes.count == 1 else {
+            return parseCharacterwise(text, delimiter: delimiter)
+        }
+        let delimiterByte = delimiterBytes[0]
+        let quote: UInt8 = 0x22, cr: UInt8 = 0x0D, lf: UInt8 = 0x0A
+
+        var records: [[String]] = []
+        var record: [String] = []
+        // The current field accumulates as raw bytes; converted once per field.
+        var field: [UInt8] = []
+        field.reserveCapacity(256)
+        var index = 0
+        var inQuotes = false
+
+        func endField() {
+            field.withUnsafeBufferPointer { buffer in
+                record.append(String(decoding: buffer, as: UTF8.self))
+            }
+            field.removeAll(keepingCapacity: true)
+        }
+        func endRecord() {
+            endField()
+            records.append(record)
+            record.removeAll(keepingCapacity: true)
+        }
+
+        while index < bytes.count {
+            let byte = bytes[index]
+            if inQuotes {
+                if byte == quote {
+                    if index + 1 < bytes.count, bytes[index + 1] == quote {
+                        field.append(quote)
+                        index += 1
+                    } else {
+                        inQuotes = false
+                    }
+                } else if byte == cr {
+                    // Normalize CR / CRLF inside quoted fields to LF.
+                    field.append(lf)
+                    if index + 1 < bytes.count, bytes[index + 1] == lf { index += 1 }
+                } else {
+                    field.append(byte)
+                }
+            } else {
+                if byte == quote && field.isEmpty {
+                    inQuotes = true
+                } else if byte == delimiterByte {
+                    endField()
+                } else if byte == lf {
+                    endRecord()
+                } else if byte == cr {
+                    endRecord()
+                    if index + 1 < bytes.count, bytes[index + 1] == lf { index += 1 }
+                } else {
+                    field.append(byte)
+                }
+            }
+            index += 1
+        }
+
+        if !field.isEmpty || !record.isEmpty {
+            endRecord()
+        }
+
+        // Drop only blank *lines* (a single empty field, i.e. no delimiter was seen),
+        // not legitimate all-empty rows like ",,," which carry real (empty) columns and
+        // must survive a load/save round-trip.
+        return records.filter { $0.count > 1 || $0.first?.isEmpty == false }
+    }
+
+    /// Character-based fallback for multi-scalar delimiters; same semantics.
+    private static func parseCharacterwise(_ text: String, delimiter: Character) -> [[String]] {
         var records: [[String]] = []
         var record: [String] = []
         var field = ""
@@ -110,9 +190,6 @@ public enum DelimitedTextParser {
             records.append(record)
         }
 
-        // Drop only blank *lines* (a single empty field, i.e. no delimiter was seen),
-        // not legitimate all-empty rows like ",,," which carry real (empty) columns and
-        // must survive a load/save round-trip.
         return records.filter { $0.count > 1 || $0.first?.isEmpty == false }
     }
 

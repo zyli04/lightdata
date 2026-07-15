@@ -304,6 +304,37 @@ final class MainWindowControllerTests: XCTestCase {
         XCTAssertNil(overlay.superview, "orphan overlay removed from the hierarchy")
     }
 
+    // MARK: - Large-cell display previews
+
+    func testEditorOpensWithFullValueNotTruncatedPreview() throws {
+        // A cell far larger than the display cap: the preview truncates for drawing
+        // speed, but editing MUST round-trip the complete raw value.
+        let hugeValue = (0..<300).map { "segment \($0)" }.joined(separator: " ")
+        XCTAssertGreaterThan(hugeValue.count, 1000)
+        try openCSV("a,b\n\"\(hugeValue)\",x\n", name: "huge.csv")
+        enableEditing()
+        controller.selectCellRange(from: (0, visibleColumn(forData: 0)), to: (0, visibleColumn(forData: 0)))
+        controller.editSelectedCell(initialText: nil)
+        let editor = try XCTUnwrap(controller.activeCellEditor)
+
+        XCTAssertEqual(editor.string, hugeValue, "editor gets the full value, not the display preview")
+        // Commit unchanged → document identical, not truncated.
+        controller.inlineCellEditorDidCommit(editor)
+        XCTAssertEqual(controller.tableDocument?.rows[0][0], hugeValue)
+        XCTAssertEqual(controller.tableDocument?.dirty, false, "no-op commit must not dirty the file")
+    }
+
+    func testDisplayPreviewCapsAndFlattens() {
+        let long = String(repeating: "x", count: 2000)
+        let preview = MainWindowController.displayPreview(long)
+        XCTAssertEqual(preview.count, 513, "512 chars + ellipsis")
+        XCTAssertTrue(preview.hasSuffix("…"))
+
+        XCTAssertEqual(MainWindowController.displayPreview("line1\nline2"), "line1 line2",
+                       "newlines flatten for the one-line cell")
+        XCTAssertEqual(MainWindowController.displayPreview("short"), "short", "short values untouched")
+    }
+
     // MARK: - Add Column end to end
 
     func testAddColumnInsertsSelectsAndUndoes() throws {

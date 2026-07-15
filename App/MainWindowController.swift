@@ -45,20 +45,23 @@ final class DataTextCellView: NSView {
     var documentRow = 0
     var columnIndex = 0
     var rawValue = ""
+    // Reconfiguration happens for every visible cell on each reload/selection pass;
+    // only invalidate when a value actually changed, or a single click repaints the
+    // whole viewport for nothing.
     var displayString = "" {
-        didSet { needsDisplay = true }
+        didSet { if displayString != oldValue { needsDisplay = true } }
     }
     var textColor = NSColor.labelColor {
-        didSet { needsDisplay = true }
+        didSet { if textColor != oldValue { needsDisplay = true } }
     }
     var alignment = NSTextAlignment.left {
-        didSet { needsDisplay = true }
+        didSet { if alignment != oldValue { needsDisplay = true } }
     }
     var font = NSFont.systemFont(ofSize: 13) {
-        didSet { needsDisplay = true }
+        didSet { if font != oldValue { needsDisplay = true } }
     }
     var selectionFill: NSColor? {
-        didSet { needsDisplay = true }
+        didSet { if selectionFill != oldValue { needsDisplay = true } }
     }
 
     override var isFlipped: Bool { true }
@@ -208,7 +211,7 @@ final class PillCellView: NSView {
     var columnIndex = 0
     var rawValue = ""
     var tokens: [(text: String, color: NSColor)] = [] { didSet { needsDisplay = true } }
-    var selectionFill: NSColor? { didSet { needsDisplay = true } }
+    var selectionFill: NSColor? { didSet { if selectionFill != oldValue { needsDisplay = true } } }
 
     private static let pillFont = NSFont.systemFont(ofSize: 12)
     private static let pillHeight: CGFloat = 18
@@ -257,8 +260,8 @@ final class PillCellView: NSView {
 final class URLCellView: NSView {
     var documentRow = 0
     var columnIndex = 0
-    var rawValue = "" { didSet { needsDisplay = true } }
-    var selectionFill: NSColor? { didSet { needsDisplay = true } }
+    var rawValue = "" { didSet { if rawValue != oldValue { needsDisplay = true } } }
+    var selectionFill: NSColor? { didSet { if selectionFill != oldValue { needsDisplay = true } } }
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { false }
@@ -338,7 +341,10 @@ protocol InlineEditableCellView: NSView {
 }
 
 extension DataTextCellView: InlineEditableCellView {
-    var editingString: String { displayString }
+    // Edit the RAW value, never displayString: the display string is a truncated
+    // single-line preview for very large cells, and committing it back would destroy
+    // the cell's real contents.
+    var editingString: String { rawValue }
 }
 
 extension URLCellView: InlineEditableCellView {
@@ -4325,7 +4331,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func configure(textCell: DataTextCellView, value: String, schema: ColumnSchema) {
         textCell.alignment = schema.type == .number ? .right : .left
         textCell.textColor = .labelColor
-        textCell.displayString = displayValue(value, schema: schema)
+        textCell.displayString = Self.displayPreview(displayValue(value, schema: schema))
 
         switch schema.type {
         case .url:
@@ -4380,6 +4386,23 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         default:
             return value
         }
+    }
+
+    /// Cell rows are one line tall, so a cell can only ever show the first ~hundred
+    /// characters — but drawing measures the WHOLE string. On files with huge cells
+    /// (e.g. a 17k-char embedded JSON per row) that made every viewport redraw cost
+    /// ~100ms. Cap the display string and flatten newlines; the full value still
+    /// backs editing (editingString = rawValue), copying, search, and export.
+    static func displayPreview(_ value: String) -> String {
+        let capLength = 512
+        if value.count <= capLength, !value.contains(where: \.isNewline) {
+            return value
+        }
+        var preview = String(value.prefix(capLength))
+        if preview.contains(where: \.isNewline) {
+            preview = preview.map { $0.isNewline ? " " : $0 }.reduce(into: "") { $0.append($1) }
+        }
+        return value.count > capLength ? preview + "…" : preview
     }
 
     private func boolValue(_ value: String, schema: ColumnSchema) -> Bool {
