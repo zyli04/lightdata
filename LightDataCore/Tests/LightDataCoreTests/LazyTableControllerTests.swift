@@ -95,4 +95,38 @@ final class LazyTableControllerTests: XCTestCase {
         XCTAssertEqual(controller.fetchBlock(rows: 0..<0, columns: [0]), [])
         XCTAssertEqual(controller.fetchBlock(rows: 0..<5, columns: [99]), [])
     }
+
+    func testQueryFailureSurfacesOnErrorAndStopsRetrying() throws {
+        let url = try makeParquet()
+        let source = try DuckDBTableSource(parquetURL: url)
+        let controller = LazyTableController(source: source, pageSize: 10, cachePages: 5)
+
+        let counted = expectation(description: "count")
+        controller.onRowCountChanged = { _ in counted.fulfill() }
+        controller.start()
+        wait(for: [counted], timeout: 5)
+
+        // Deleting the file mid-session makes every subsequent scan fail — the shape
+        // of "file replaced/truncated during the watcher debounce".
+        try FileManager.default.removeItem(at: url)
+
+        let errored = expectation(description: "error surfaced")
+        errored.assertForOverFulfill = false
+        controller.onError = { _ in errored.fulfill() }
+        var loads = 0
+        controller.onRowsLoaded = { _ in loads += 1 }
+        controller.updateViewport(rows: 0..<10, columns: [0, 1])
+        wait(for: [errored], timeout: 5)
+        XCTAssertEqual(loads, 0)
+
+        // Further viewport reports for the same (failed) query must not refetch: the
+        // failed-generation latch suppresses the per-scroll retry storm.
+        var subsequentErrors = 0
+        controller.onError = { _ in subsequentErrors += 1 }
+        controller.updateViewport(rows: 10..<20, columns: [0, 1])
+        let settle = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settle.fulfill() }
+        wait(for: [settle], timeout: 5)
+        XCTAssertEqual(subsequentErrors, 0, "failed query must not be re-issued per viewport tick")
+    }
 }

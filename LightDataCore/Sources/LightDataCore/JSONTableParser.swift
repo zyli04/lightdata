@@ -80,13 +80,18 @@ enum JSONTableParser {
         return ParsedTable(headers: orderedHeaders, rows: rows)
     }
 
-    private static func flatten(_ object: [String: Any], prefix: String = "") -> [String: String] {
+    /// Recursion cap for nested objects. JSONSerialization itself parses arbitrarily
+    /// deep structures fine, but unbounded recursion here would overflow the stack on
+    /// a pathological file; beyond the cap the subtree is stringified as raw JSON.
+    private static let maxFlattenDepth = 64
+
+    private static func flatten(_ object: [String: Any], prefix: String = "", depth: Int = 0) -> [String: String] {
         var result: [String: String] = [:]
         for key in object.keys.sorted() {
             let value = object[key] ?? NSNull()
             let path = prefix.isEmpty ? key : "\(prefix).\(key)"
-            if let nested = value as? [String: Any] {
-                result.merge(flatten(nested, prefix: path), uniquingKeysWith: { _, new in new })
+            if let nested = value as? [String: Any], depth < maxFlattenDepth {
+                result.merge(flatten(nested, prefix: path, depth: depth + 1), uniquingKeysWith: { _, new in new })
             } else {
                 result[path] = stringify(value)
             }

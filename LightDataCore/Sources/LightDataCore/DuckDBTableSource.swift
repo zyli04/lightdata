@@ -63,8 +63,13 @@ public final class DuckDBTableSource {
             // range is ~O(1) at any depth — unlike LIMIT/OFFSET which rescans from
             // the start. The schema probe must NOT request it (it's not a data column).
             let relation = "read_parquet(\(Self.sqlStringLiteral(url.path)), file_row_number=true)"
-            let schemaResult = try connection.query("SELECT * FROM read_parquet(\(Self.sqlStringLiteral(url.path))) LIMIT 0")
+            // Probe with file_row_number=true — the same option every page query uses.
+            // DuckDB refuses that option when the file has a column literally named
+            // "file_row_number" (any case); probing without it would "open" the file
+            // and then have every page query fail into permanent placeholders.
+            let schemaResult = try connection.query("SELECT * FROM \(relation) LIMIT 0")
             let rawNames = (0..<schemaResult.columnCount).map { schemaResult.columnName(at: $0) }
+                .filter { $0.lowercased() != "file_row_number" }
             let unique = makeUnique(rawNames)
             guard !unique.isEmpty else { throw TableDocumentError.emptyFile }
 

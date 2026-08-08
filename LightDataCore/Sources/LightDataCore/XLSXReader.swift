@@ -66,6 +66,10 @@ enum XLSXReader {
         )
     }
 
+    /// Total extracted-size budget. Real workbooks are tens of MB unzipped; a zip bomb
+    /// (a few KB inflating to hundreds of GB) would otherwise fill the temp volume.
+    private static let extractionBudget: Int64 = 4 << 30   // 4 GiB
+
     private static func extractZip(_ url: URL, to destination: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
@@ -73,6 +77,16 @@ enum XLSXReader {
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { throw XLSXReaderError.extractionFailed }
+
+        // ditto has no size cap of its own; enforce the budget after the fact (the
+        // caller's defer removes the tree either way).
+        var total: Int64 = 0
+        let enumerator = FileManager.default.enumerator(at: destination, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileSizeKey])
+        while let item = enumerator?.nextObject() as? URL {
+            let values = try? item.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileSizeKey])
+            total += Int64(values?.totalFileAllocatedSize ?? values?.fileSize ?? 0)
+            guard total <= extractionBudget else { throw XLSXReaderError.extractionFailed }
+        }
     }
 
     /// Locates the workbook's FIRST worksheet part. The workbook lists sheets in

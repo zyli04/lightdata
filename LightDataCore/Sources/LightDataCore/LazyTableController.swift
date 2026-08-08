@@ -37,6 +37,13 @@ public final class LazyTableController {
     public var onRowsLoaded: ((IndexSet) -> Void)?
     /// Called on the main queue when the matching row count changes.
     public var onRowCountChanged: ((Int) -> Void)?
+    /// Called on the main queue when a count/page query fails. Errors were previously
+    /// swallowed (`try?`), leaving the grid stuck on "…" placeholders with no feedback
+    /// and a retry storm on every scroll tick.
+    public var onError: ((Error) -> Void)?
+    /// Set once a query fails for the current generation; cleared on the next
+    /// setQuery/refresh. Suppresses per-scroll-tick retries of a known-bad query.
+    private var failedGeneration: Int?
 
     public var headers: [String] { source.headers }
     public var pageSize: Int { cache.pageSize }
@@ -113,14 +120,21 @@ public final class LazyTableController {
     private func refreshCount() {
         let gen = generation
         let spec = self.spec
+        failedGeneration = nil
         queue.async { [weak self] in
             guard let self else { return }
-            let count = (try? self.source.rowCount(matching: spec)) ?? 0
+            let outcome = Result { try self.source.rowCount(matching: spec) }
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
-                self.rowCount = count
-                self.onRowCountChanged?(count)
-                self.fetchPendingIfNeeded()
+                switch outcome {
+                case .success(let count):
+                    self.rowCount = count
+                    self.onRowCountChanged?(count)
+                    self.fetchPendingIfNeeded()
+                case .failure(let error):
+                    self.failedGeneration = gen
+                    self.onError?(error)
+                }
             }
         }
     }
@@ -130,6 +144,9 @@ public final class LazyTableController {
     }
 
     private func fetchPendingIfNeeded() {
+        // A query that already failed for this generation will fail again; don't
+        // re-issue it on every scroll tick. setQuery/refreshCount clears the flag.
+        guard failedGeneration != generation else { return }
         guard !isFetching, rowCount > 0, let rowRange = pendingRowRange else { return }
         let ps = cache.pageSize
         let firstPage = max(0, rowRange.lowerBound / ps)
@@ -163,13 +180,20 @@ public final class LazyTableController {
         let limit = (hi - lo + 1) * ps
         queue.async { [weak self] in
             guard let self else { return }
-            let fetched: (data: [Int: [String]], rowCount: Int)
-            fetched = (try? self.source.columns(cols, matching: spec, offset: offset, limit: limit)) ?? (data: [:], rowCount: 0)
+            let outcome = Result { try self.source.columns(cols, matching: spec, offset: offset, limit: limit) }
             DispatchQueue.main.async {
                 self.isFetching = false
-                if gen == self.generation, fetched.rowCount > 0 {
-                    self.storeBlock(fetched.data, firstPage: lo, totalRows: fetched.rowCount)
-                    self.onRowsLoaded?(IndexSet(integersIn: offset..<(offset + fetched.rowCount)))
+                switch outcome {
+                case .success(let fetched):
+                    if gen == self.generation, fetched.rowCount > 0 {
+                        self.storeBlock(fetched.data, firstPage: lo, totalRows: fetched.rowCount)
+                        self.onRowsLoaded?(IndexSet(integersIn: offset..<(offset + fetched.rowCount)))
+                    }
+                case .failure(let error):
+                    if gen == self.generation {
+                        self.failedGeneration = gen
+                        self.onError?(error)
+                    }
                 }
                 // If the viewport moved while fetching, fetch the latest now.
                 if token != self.viewportToken {

@@ -1120,14 +1120,15 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             removeActiveTextSelectionView()
             removeActiveCellEditor(commit: true)
             saveCurrentMetadata()
-            tearDownLazyController()
-            // Load view memory first so the remembered "first row is header" choice can
-            // be applied at parse time.
+            // Build the NEW document fully before tearing anything down: if the load
+            // throws, the currently-open document (including a lazy controller) must
+            // stay intact — tearing down first left a half-dead window on failure.
             let savedMetadata = ViewMetadataStore.load(for: url)
             var loaded: TableDocument
+            var newLazyController: LazyTableController?
             let ext = url.pathExtension.lowercased()
             if ext == "parquet" || ext == "pq" {
-                loaded = try openLazyParquet(url: url)
+                (loaded, newLazyController) = try makeLazyParquetDocument(url: url)
             } else {
                 loaded = try TableDocument.load(url: url, firstRowIsHeader: savedMetadata.hasHeaderRow ?? true)
             }
@@ -1136,6 +1137,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                let names = savedMetadata.headerlessColumnNames,
                names.count == loaded.headers.count {
                 loaded.headers = names
+            }
+            tearDownLazyController()
+            if let newLazyController {
+                lazyController = newLazyController
+                newLazyController.start()
             }
             tableDocument = loaded
             editLocked = true
@@ -1165,9 +1171,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
-    /// Sets up the lazy/paged DuckDB controller for a Parquet file and returns a
-    /// header-only document to drive the rest of the UI.
-    private func openLazyParquet(url: URL) throws -> TableDocument {
+    /// Builds the lazy/paged DuckDB controller for a Parquet file plus its header-only
+    /// document. Pure construction — does NOT install the controller or start it, so a
+    /// throwing open leaves the current document untouched.
+    private func makeLazyParquetDocument(url: URL) throws -> (TableDocument, LazyTableController) {
         let source = try DuckDBTableSource(parquetURL: url)
         let controller = LazyTableController(source: source)
         controller.onRowCountChanged = { [weak self] _ in
@@ -1193,12 +1200,23 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             guard !rowsToReload.isEmpty, !visibleColumns.isEmpty else { return }
             self.tableView.reloadData(forRowIndexes: rowsToReload, columnIndexes: visibleColumns)
         }
-        lazyController = controller
-        controller.start()
-        return TableDocument.lazyHeaderOnly(url: url, format: .parquet, headers: source.headers, readOnlyReason: "Parquet read-only")
+        controller.onError = { [weak self] error in
+            guard let self else { return }
+            // Surface query failures in the status bar (no modal: this can fire during
+            // scrolling). The controller stops retrying the failed query on its own.
+            self.statusLabel.stringValue = "Load error: \(error.localizedDescription)"
+            self.statusBadge.isHidden = false
+        }
+        let document = TableDocument.lazyHeaderOnly(url: url, format: .parquet, headers: source.headers, readOnlyReason: "Parquet read-only")
+        return (document, controller)
     }
 
     private func tearDownLazyController() {
+        // Nil the callbacks too: an in-flight scan finishes on its own queue and would
+        // otherwise call back into this window about the PREVIOUS document.
+        lazyController?.onRowsLoaded = nil
+        lazyController?.onRowCountChanged = nil
+        lazyController?.onError = nil
         lazyController = nil
     }
 
@@ -1577,6 +1595,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateActiveTextSelectionFrame()
         updateTrailingGridLine()
         selectionOverlayView.needsDisplay = true   // selection rect position may change
+        // Narrowing a column slides new columns into view without any scroll event;
+        // without this they'd sit on "…" until the next scroll.
+        if isLazy { updateLazyViewport() }
         // Live resize fires this many times per drag; debounce the disk write.
         captureMetadata()
         metadataPersistWorkItem?.cancel()
@@ -1601,6 +1622,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateStatus()
         updateToolbarState()
         persistViewMetadata()
+        // A far column dragged into the visible area needs its cells fetched.
+        if isLazy { updateLazyViewport() }
     }
 
     /// Registers undo for a completed column drag (column went `originalIndex` →

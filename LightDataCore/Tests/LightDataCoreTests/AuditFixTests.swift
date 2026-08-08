@@ -226,4 +226,18 @@ final class AuditFixTests: XCTestCase {
         let doc = try TableDocument.load(url: url)
         XCTAssertTrue(doc.readOnly)
     }
+
+    func testDeepJSONNestingIsCappedNotRecursedInto() throws {
+        // JSONSerialization itself rejects ~512+ nesting levels, so parsing can't
+        // stack-overflow; this covers flatten's own cap (64): levels beyond it must be
+        // stringified into one cell, not recursed into.
+        let depth = 300
+        let json = "[{" + String(repeating: "\"a\":{", count: depth) + "\"v\":\"x\"" + String(repeating: "}", count: depth) + "}]"
+        let url = tempDir.appendingPathComponent("deep.json")
+        try Data(json.utf8).write(to: url)
+        let doc = try TableDocument.load(url: url)
+        XCTAssertEqual(doc.rows.count, 1)
+        XCTAssertEqual(doc.headers.count, 1, "capped: one dot-path column, remainder stringified")
+        XCTAssertTrue(doc.readOnly, "nested JSON is lossy → read-only")
+    }
 }
