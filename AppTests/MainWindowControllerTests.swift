@@ -353,6 +353,25 @@ final class MainWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.tableView.sortDescriptors.first?.key, "0", "still sorting by id")
     }
 
+    func testActiveFilterFollowsColumnThroughSaveAndUndo() throws {
+        try openCSV()                                                // name,age,city
+        enableEditing()
+        useExplicitUndoGroups()
+        controller.activeFilter = TableFilter(columnIndex: 0, operation: .equals, value: "Bob")
+        controller.rebuildVisibleRows()
+        XCTAssertEqual(controller.tableView.numberOfRows, 1)
+        dragColumn(fromData: 2, toData: 0)                           // city to the front
+        save()
+        XCTAssertEqual(controller.tableDocument?.headers, ["city", "name", "age"])
+        XCTAssertEqual(controller.activeFilter?.columnIndex, 1, "still filtering name")
+        XCTAssertEqual(controller.tableView.numberOfRows, 1)
+        XCTAssertEqual(controller.columnPopup.titleOfSelectedItem, "name", "popup shows the filtered column")
+        controller.documentUndoManager.undo()                        // Apply Column Order
+        XCTAssertEqual(controller.activeFilter?.columnIndex, 0, "still filtering name")
+        XCTAssertEqual(controller.tableView.numberOfRows, 1)
+        XCTAssertEqual(controller.columnPopup.titleOfSelectedItem, "name")
+    }
+
     // MARK: - Frozen intent types
 
     func testTypeMenuOffersOnlyFormatTypes() throws {

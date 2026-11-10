@@ -1005,7 +1005,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     var tableDocument: TableDocument?
     private var visibleRows: [Int] = []
-    private var activeFilter: TableFilter?
+    var activeFilter: TableFilter?
     var metadata = ViewMetadata()
     var schema = TableSchema()
     var editLocked = true
@@ -1418,7 +1418,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableDocument?.reorderColumns(to: order)
         documentColumnOrderDirty = false
         if let headers = tableDocument?.headers { metadata.columnOrder = headers }
-        remapSortDescriptors(oldToNew: inverse)
+        remapColumnIndexedViewState(oldToNew: inverse)
         rebuildAfterColumnPermutation()
     }
 
@@ -1434,13 +1434,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         documentUndoManager.setActionName("Apply Column Order")
         tableDocument?.reorderColumns(to: inverse)
         documentColumnOrderDirty = true
-        remapSortDescriptors(oldToNew: order)
+        remapColumnIndexedViewState(oldToNew: order)
         rebuildAfterColumnPermutation()
     }
 
-    /// Sort descriptor keys are document column indices; keep them pointing at the
-    /// same column after a permutation (without registering a new "Sort" undo).
-    private func remapSortDescriptors(oldToNew: [Int]) {
+    /// The sort descriptor key and the active filter both address columns by document
+    /// index; keep them on the same column after a permutation (without registering a
+    /// new "Sort" undo).
+    private func remapColumnIndexedViewState(oldToNew: [Int]) {
+        if let filter = activeFilter, oldToNew.indices.contains(filter.columnIndex) {
+            activeFilter?.columnIndex = oldToNew[filter.columnIndex]
+        }
         let remapped = tableView.sortDescriptors.map { descriptor -> NSSortDescriptor in
             guard let key = descriptor.key, let old = Int(key), oldToNew.indices.contains(old) else { return descriptor }
             return NSSortDescriptor(key: String(oldToNew[old]), ascending: descriptor.ascending)
@@ -3704,6 +3708,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         columnPopup.removeAllItems()
         if let tableDocument {
             columnPopup.addItems(withTitles: tableDocument.headers)
+            // Keep the popup on the column the active filter actually reads.
+            if let filter = activeFilter, tableDocument.headers.indices.contains(filter.columnIndex) {
+                columnPopup.selectItem(at: filter.columnIndex)
+            }
         }
         saveButton.isEnabled = tableDocument?.readOnly == false
     }
