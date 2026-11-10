@@ -18,6 +18,34 @@ final class TableDocumentColumnTests: XCTestCase {
         )
     }
 
+    // MARK: - row permutation
+
+    func testPermuteRowsAndInverseRoundTrip() {
+        var doc = makeDocument(headers: ["id", "name"], rows: [["2", "Beta"], ["1", "Alpha"], ["3", "Gamma"]])
+        let order = [1, 0, 2]
+        doc.permuteRows(order)
+        XCTAssertEqual(doc.rows.map { $0[0] }, ["1", "2", "3"])
+        XCTAssertTrue(doc.dirty)
+        doc.permuteRows(TableDocument.inversePermutation(order))
+        XCTAssertEqual(doc.rows.map { $0[0] }, ["2", "1", "3"])
+    }
+
+    func testPermuteRowsRejectsNonPermutation() {
+        let rows = [["a"], ["b"], ["c"]]
+        var doc = makeDocument(headers: ["x"], rows: rows)
+        doc.permuteRows([0, 0, 2])
+        doc.permuteRows([0, 1])
+        XCTAssertEqual(doc.rows, rows)
+        XCTAssertFalse(doc.dirty)
+        var readOnly = makeDocument(headers: ["x"], rows: rows, readOnly: true)
+        readOnly.permuteRows([2, 1, 0])
+        XCTAssertEqual(readOnly.rows, rows)
+    }
+
+    func testInversePermutation() {
+        XCTAssertEqual(TableDocument.inversePermutation([2, 0, 1]), [1, 2, 0])
+    }
+
     // MARK: - insertColumn
 
     func testInsertColumnInMiddle() {

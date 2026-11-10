@@ -340,6 +340,29 @@ public struct TableDocument {
         dirty = true
     }
 
+    /// Reorders rows so that new row `i` is old row `order[i]`. Ignored unless `order`
+    /// is a permutation of `rows.indices`.
+    public mutating func permuteRows(_ order: [Int]) {
+        guard !readOnly,
+              order.count == rows.count,
+              Set(order) == Set(rows.indices) else {
+            return
+        }
+        guard order != Array(rows.indices) else { return }
+        rows = order.map { rows[$0] }
+        dirty = true
+    }
+
+    /// The permutation that undoes `order`: applying `order` then the result restores
+    /// the original arrangement (`inverse[order[i]] == i`).
+    public static func inversePermutation(_ order: [Int]) -> [Int] {
+        var inverse = Array(repeating: 0, count: order.count)
+        for (newIndex, oldIndex) in order.enumerated() where inverse.indices.contains(oldIndex) {
+            inverse[oldIndex] = newIndex
+        }
+        return inverse
+    }
+
     public mutating func reorderColumns(to order: [Int]) {
         guard !readOnly,
               order.count == headers.count,

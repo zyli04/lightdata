@@ -1377,29 +1377,103 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateStatus()
     }
 
-    /// Bakes the active sort into the row order so Save persists it (edit mode only).
-    /// Sorts ALL rows by the descriptor — filter/search are view-only and never drop
-    /// rows from the saved file.
-    private func bakeActiveSortIfNeeded(into doc: inout TableDocument) {
-        guard isEditingEnabled, !doc.readOnly,
+    /// The row permutation that bakes the active sort into the file on Save (edit mode
+    /// only), or nil when nothing would move. Sorts ALL rows by the descriptor —
+    /// filter/search are view-only and never drop rows from the saved file.
+    private func bakeActiveSortIfNeeded() -> [Int]? {
+        guard isEditingEnabled, let doc = tableDocument, !doc.readOnly,
               let descriptor = tableView.sortDescriptors.first,
-              descriptor.key != nil else { return }
+              descriptor.key != nil else { return nil }
         let order = TableQueryEngine.visibleRows(in: doc, search: "", filter: nil, sortDescriptor: descriptor)
-        guard order.count == doc.rows.count, order != Array(doc.rows.indices) else { return }
-        doc.rows = order.map { doc.rows[$0] }
+        guard order.count == doc.rows.count, order != Array(doc.rows.indices) else { return nil }
+        return order
+    }
+
+    /// Applies a row permutation as one undoable step. Save uses it to bake the sort,
+    /// so undo history recorded in the pre-save row coordinates stays valid: undoing
+    /// past the save first restores those coordinates.
+    private func performUndoableRowPermutation(_ order: [Int]) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        let inverse = TableDocument.inversePermutation(order)
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableRowPermutation(inverse)
+        }
+        documentUndoManager.setActionName("Apply Sort")
+        tableDocument?.permuteRows(order)
+        rebuildVisibleRows()
+        updateStatus()
+        updateToolbarState()
+    }
+
+    /// Applies a document column permutation as one undoable step (Save bakes the
+    /// visible column order with it). The visible arrangement doesn't change — only
+    /// which document index each column lives at.
+    private func performUndoableColumnPermutation(_ order: [Int]) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        let inverse = TableDocument.inversePermutation(order)
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.undoColumnPermutation(inverse)
+        }
+        documentUndoManager.setActionName("Apply Column Order")
+        tableDocument?.reorderColumns(to: order)
+        documentColumnOrderDirty = false
+        if let headers = tableDocument?.headers { metadata.columnOrder = headers }
+        remapSortDescriptors(oldToNew: inverse)
+        rebuildAfterColumnPermutation()
+    }
+
+    /// Inverse of performUndoableColumnPermutation: puts columns back at their pre-save
+    /// document indices while keeping the visible order the user arranged (so the
+    /// pending visual reorder is dirty again, exactly as before the save).
+    private func undoColumnPermutation(_ inverse: [Int]) {
+        guard let doc = tableDocument, !doc.readOnly else { return }
+        let order = TableDocument.inversePermutation(inverse)
+        documentUndoManager.registerUndo(withTarget: self) { target in
+            target.performUndoableColumnPermutation(order)
+        }
+        documentUndoManager.setActionName("Apply Column Order")
+        tableDocument?.reorderColumns(to: inverse)
+        documentColumnOrderDirty = true
+        remapSortDescriptors(oldToNew: order)
+        rebuildAfterColumnPermutation()
+    }
+
+    /// Sort descriptor keys are document column indices; keep them pointing at the
+    /// same column after a permutation (without registering a new "Sort" undo).
+    private func remapSortDescriptors(oldToNew: [Int]) {
+        let remapped = tableView.sortDescriptors.map { descriptor -> NSSortDescriptor in
+            guard let key = descriptor.key, let old = Int(key), oldToNew.indices.contains(old) else { return descriptor }
+            return NSSortDescriptor(key: String(oldToNew[old]), ascending: descriptor.ascending)
+        }
+        guard remapped != tableView.sortDescriptors else { return }
+        suppressSortPersistence = true
+        tableView.sortDescriptors = remapped
+        suppressSortPersistence = false
+    }
+
+    private func rebuildAfterColumnPermutation() {
+        buildColumns()
+        refreshFilterControls()
+        rebuildVisibleRows()
+        updateStatus()
+        updateToolbarState()
     }
 
     func saveDocument() {
         // Commit any in-progress cell edit first so ⌘S writes what the user sees.
         endActiveCellTextInteraction(commit: true)
+        // Bake the arrangement as undoable steps so earlier undo entries keep valid
+        // coordinates (the old in-place bake made undo write the wrong row/column).
+        if let order = bakeActiveSortIfNeeded() {
+            performUndoableRowPermutation(order)
+        }
+        if documentColumnOrderDirty, let doc = tableDocument,
+           let order = currentVisibleDataColumnOrder(in: doc),
+           order != Array(doc.headers.indices) {
+            performUndoableColumnPermutation(order)
+        }
         guard var current = tableDocument else { return }
         do {
-            bakeActiveSortIfNeeded(into: &current)
-            if documentColumnOrderDirty,
-               let order = currentVisibleDataColumnOrder(in: current),
-               order != Array(current.headers.indices) {
-                current.reorderColumns(to: order)
-            }
             try current.save()
             tableDocument = current
             documentColumnOrderDirty = false

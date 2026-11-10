@@ -224,6 +224,135 @@ final class MainWindowControllerTests: XCTestCase {
         XCTAssertFalse(try String(contentsOf: url, encoding: .utf8).contains("abc"))
     }
 
+    // MARK: - Save-time arrangement & undo
+
+    private let sortFixture = "id,name\n2,Beta\n1,Alpha\n3,Gamma\n"
+
+    /// Each UI gesture is its own event, hence its own undo group. A test runs inside
+    /// one run-loop pass, where automatic grouping would merge every step into a single
+    /// group — so group explicitly, one group per simulated user action.
+    private func useExplicitUndoGroups() {
+        controller.documentUndoManager.groupsByEvent = false
+    }
+
+    private func userAction(_ body: () throws -> Void) rethrows {
+        let undo = controller.documentUndoManager
+        undo.beginUndoGrouping()
+        defer { undo.endUndoGrouping() }
+        try body()
+    }
+
+    private func commitEdit(row: Int, dataColumn: Int, text: String) throws {
+        try userAction {
+            controller.selectCellRange(from: (row, visibleColumn(forData: dataColumn)), to: (row, visibleColumn(forData: dataColumn)))
+            controller.editSelectedCell(initialText: text)
+            controller.inlineCellEditorDidCommit(try XCTUnwrap(controller.activeCellEditor))
+        }
+    }
+
+    private func sortByColumn(_ key: String) {
+        userAction { controller.tableView.sortDescriptors = [NSSortDescriptor(key: key, ascending: true)] }
+    }
+
+    private func dragColumn(fromData: Int, toData: Int) {
+        let from = visibleColumn(forData: fromData), to = visibleColumn(forData: toData)
+        userAction {
+            controller.tableView.moveColumn(from, toColumn: to)
+            controller.registerColumnDragUndo(originalIndex: from, newIndex: to)
+        }
+    }
+
+    private func save() {
+        userAction { controller.saveDocument() }
+    }
+
+    func testUndoAfterSortedSaveRestoresOriginalCells() throws {
+        try openCSV(sortFixture)
+        enableEditing()
+        useExplicitUndoGroups()
+        try commitEdit(row: 1, dataColumn: 1, text: "Changed")       // Alpha → Changed
+        sortByColumn("0")
+        save()
+        let undo = controller.documentUndoManager
+        XCTAssertEqual(undo.undoActionName, "Apply Sort")
+        undo.undo()
+        XCTAssertEqual(undo.undoActionName, "Sort")
+        undo.undo()
+        XCTAssertEqual(undo.undoActionName, "Edit Cell")
+        undo.undo()
+        XCTAssertEqual(controller.tableDocument?.rows, [["2", "Beta"], ["1", "Alpha"], ["3", "Gamma"]])
+        for _ in 0..<3 { undo.redo() }
+        XCTAssertEqual(controller.tableDocument?.rows, [["1", "Changed"], ["2", "Beta"], ["3", "Gamma"]])
+    }
+
+    func testEditAfterSortedSaveUndoesCleanly() throws {
+        try openCSV(sortFixture)
+        enableEditing()
+        useExplicitUndoGroups()
+        try commitEdit(row: 1, dataColumn: 1, text: "Changed")
+        sortByColumn("0")
+        save()
+        XCTAssertEqual(controller.tableDocument?.rows[0], ["1", "Changed"])
+        try commitEdit(row: 0, dataColumn: 1, text: "Again")
+        XCTAssertEqual(controller.tableDocument?.rows[0], ["1", "Again"])
+        let undo = controller.documentUndoManager
+        undo.undo()                                                  // Edit Cell (post-save)
+        XCTAssertEqual(controller.tableDocument?.rows[0], ["1", "Changed"])
+        for _ in 0..<3 { undo.undo() }                               // Apply Sort, Sort, Edit Cell
+        XCTAssertEqual(controller.tableDocument?.rows, [["2", "Beta"], ["1", "Alpha"], ["3", "Gamma"]])
+    }
+
+    func testUndoAfterSaveWithColumnMoveRestoresCells() throws {
+        try openCSV()                                                // name,age,city
+        enableEditing()
+        useExplicitUndoGroups()
+        try commitEdit(row: 0, dataColumn: 1, text: "31")
+        dragColumn(fromData: 2, toData: 0)                           // city to the front
+        save()
+        XCTAssertEqual(controller.tableDocument?.headers, ["city", "name", "age"])
+        let undo = controller.documentUndoManager
+        XCTAssertEqual(undo.undoActionName, "Apply Column Order")
+        undo.undo()
+        XCTAssertEqual(controller.tableDocument?.headers, ["name", "age", "city"])
+        XCTAssertEqual(controller.tableView.tableColumns.dropFirst().map(\.identifier.rawValue), ["2", "0", "1"],
+                       "visible arrangement unchanged: city still shown first")
+        XCTAssertEqual(undo.undoActionName, "Move Column")
+        undo.undo()
+        XCTAssertEqual(undo.undoActionName, "Edit Cell")
+        undo.undo()
+        XCTAssertEqual(controller.tableDocument?.rows[0], ["Alice", "30", "NYC"])
+    }
+
+    func testUndoAfterSaveWithSortAndColumnMove() throws {
+        try openCSV(sortFixture)
+        enableEditing()
+        useExplicitUndoGroups()
+        try commitEdit(row: 1, dataColumn: 1, text: "Changed")
+        sortByColumn("0")
+        dragColumn(fromData: 1, toData: 0)                           // name before id
+        save()
+        XCTAssertEqual(controller.tableDocument?.headers, ["name", "id"])
+        let undo = controller.documentUndoManager
+        var steps = 0
+        while undo.canUndo, steps < 20 { undo.undo(); steps += 1 }
+        XCTAssertEqual(steps, 4, "Save (bakes sort + column order as one step), Move Column, Sort, Edit Cell")
+        XCTAssertEqual(controller.tableDocument?.headers, ["id", "name"])
+        XCTAssertEqual(controller.tableDocument?.rows, [["2", "Beta"], ["1", "Alpha"], ["3", "Gamma"]])
+    }
+
+    func testSortDescriptorFollowsColumnThroughSaveAndUndo() throws {
+        try openCSV(sortFixture)
+        enableEditing()
+        useExplicitUndoGroups()
+        sortByColumn("0")                                            // by id
+        dragColumn(fromData: 1, toData: 0)
+        save()
+        XCTAssertEqual(controller.tableDocument?.headers, ["name", "id"])
+        XCTAssertEqual(controller.tableView.sortDescriptors.first?.key, "1", "still sorting by id")
+        controller.documentUndoManager.undo()                        // Apply Column Order
+        XCTAssertEqual(controller.tableView.sortDescriptors.first?.key, "0", "still sorting by id")
+    }
+
     // MARK: - Column operations & undo consistency
 
     func testDeleteColumnIsUndoableAndRestoresValues() throws {
