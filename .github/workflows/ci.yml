@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core unit tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: echo "XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: LightDataCore/.build
+          key: core-${{ runner.os }}-${{ hashFiles('LightDataCore/Package.resolved') }}
+      - run: Scripts/test.sh core
+
+  app:
+    name: App-hosted integration tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: echo "XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: .build/dd/SourcePackages
+          key: app-spm-${{ runner.os }}-${{ hashFiles('LightDataCore/Package.resolved') }}
+      - run: Scripts/test.sh app

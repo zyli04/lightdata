@@ -9,7 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-XCODE=/Applications/Xcode.app/Contents/Developer
+# CI (or a second Xcode install) can point this elsewhere: XCODE=/path/Contents/Developer
+XCODE="${XCODE:-/Applications/Xcode.app/Contents/Developer}"
 MODE="${1:-all}"
 
 if [[ "$MODE" == "core" || "$MODE" == "all" ]]; then
@@ -23,7 +24,7 @@ if [[ "$MODE" == "app" || "$MODE" == "all" ]]; then
     "$XCODE/usr/bin/xcodebuild" test \
         -project LightData.xcodeproj -scheme LightData \
         -configuration Debug -derivedDataPath .build/dd 2>&1 \
-        | grep -E "Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)|failed \(|error:" | tail -8
+        | grep -E "Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)|: error: -\[|\.swift:[0-9]+:[0-9]+: error:"
 fi
 
 echo "==> done"
