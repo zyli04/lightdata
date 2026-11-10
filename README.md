@@ -2,8 +2,9 @@
 
 # LightData
 
-**A native macOS viewer for data files: CSV, TSV, JSON, Excel and Parquet files bigger than your RAM.**
+### Light app. Heavy data.
 
+A native macOS viewer for CSV, TSV, JSON, Excel and Parquet files bigger than your RAM.<br/>
 Double-click a file and see it, without opening a notebook.
 
 [![CI](https://github.com/zyli04/lightdata/actions/workflows/ci.yml/badge.svg)](https://github.com/zyli04/lightdata/actions/workflows/ci.yml)
