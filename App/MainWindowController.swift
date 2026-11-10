@@ -3637,10 +3637,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return item
     }
 
-    private func typeMenuItem(columnIndex: Int? = nil) -> NSMenuItem {
+    func typeMenuItem(columnIndex: Int? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: "Set Type", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-        for type in ColumnType.allCases {
+        for type in ColumnType.offeredCases {
             let typeItem = ColumnTypeMenuItem(title: type.displayName, action: #selector(setColumnTypeFromMenu(_:)), keyEquivalent: "")
             typeItem.representedObject = type
             typeItem.columnIndex = columnIndex ?? activeColumnIndex() ?? 0

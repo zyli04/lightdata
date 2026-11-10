@@ -353,6 +353,14 @@ final class MainWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.tableView.sortDescriptors.first?.key, "0", "still sorting by id")
     }
 
+    // MARK: - Frozen intent types
+
+    func testTypeMenuOffersOnlyFormatTypes() throws {
+        try openCSV()
+        let titles = controller.typeMenuItem(columnIndex: 0).submenu?.items.map(\.title)
+        XCTAssertEqual(titles, ["Text", "Number", "Date", "Checkbox", "URL"])
+    }
+
     // MARK: - Column operations & undo consistency
 
     func testDeleteColumnIsUndoableAndRestoresValues() throws {

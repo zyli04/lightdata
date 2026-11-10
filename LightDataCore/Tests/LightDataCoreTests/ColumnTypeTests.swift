@@ -62,6 +62,23 @@ final class ColumnTypeTests: XCTestCase {
         XCTAssertEqual(ColumnTypeValidator.conformingFormatTypes(for: ["1.5", "2.0"]), [.number])
     }
 
+    // MARK: - Frozen intent types
+
+    func testOfferedCasesExcludeIntentTypes() {
+        XCTAssertEqual(ColumnType.offeredCases, [.text, .number, .date, .checkbox, .url])
+        XCTAssertTrue(ColumnType.status.isFrozen)
+        XCTAssertTrue(ColumnType.select.isFrozen)
+        XCTAssertTrue(ColumnType.multiSelect.isFrozen)
+        XCTAssertFalse(ColumnType.number.isFrozen)
+    }
+
+    func testFrozenIntentTypeResolvesAsTextButIsKept() {
+        var schema = TableSchema()
+        schema.setType(.status, for: "s", sampleValues: ["todo", "done"])
+        XCTAssertEqual(schema.schema(for: "s").type, .text)
+        XCTAssertEqual(schema.columns["s"]?.type, .status, "stored metadata untouched")
+    }
+
     // MARK: - Inference (auto-assign only when unambiguous)
 
     func testInferUniqueMatch() {

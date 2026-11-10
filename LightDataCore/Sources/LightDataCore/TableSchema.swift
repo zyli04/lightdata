@@ -34,6 +34,15 @@ public enum ColumnType: String, Codable, CaseIterable {
         case .text, .select, .multiSelect, .status: false
         }
     }
+
+    /// Types the UI offers. Intent types (select/multiSelect/status) are frozen: LightData
+    /// is a data-file viewer, not a Notion-style authoring tool. Their code and any
+    /// stored metadata stay, so unfreezing later restores them.
+    public static let offeredCases: [ColumnType] = [.text, .number, .date, .checkbox, .url]
+
+    public var isFrozen: Bool {
+        !ColumnType.offeredCases.contains(self)
+    }
 }
 
 /// Pure (Foundation-only) conformance tests for the format types. Shared by inference
@@ -145,8 +154,13 @@ public struct TableSchema: Codable, Equatable {
         self.columns = columns
     }
 
+    /// The effective schema for a column. A frozen (intent) type resolves as plain text;
+    /// the stored entry in `columns` is left untouched.
     public func schema(for header: String) -> ColumnSchema {
-        columns[header] ?? ColumnSchema(type: .text)
+        guard let stored = columns[header], !stored.type.isFrozen else {
+            return ColumnSchema(type: .text)
+        }
+        return stored
     }
 
     public mutating func setType(_ type: ColumnType, for header: String, sampleValues: [String]) {
