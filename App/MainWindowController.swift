@@ -1390,6 +1390,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func saveDocument() {
+        // Commit any in-progress cell edit first so ⌘S writes what the user sees.
+        endActiveCellTextInteraction(commit: true)
         guard var current = tableDocument else { return }
         do {
             bakeActiveSortIfNeeded(into: &current)
@@ -1417,17 +1419,23 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     /// "Save As": writes the current contents to a new file/format, then re-points this
     /// window at the new file (the original file is left untouched). Saving a read-only
     /// document (XLSX/Parquet) to an editable format is how it becomes editable.
-    func saveDocumentAs() {
-        guard var current = tableDocument, let window else { return }
-        removeActiveTextSelectionView()
-        removeActiveCellEditor(commit: true)
-
+    /// The document exactly as "Save As" should write it: commits any in-progress
+    /// cell edit first, then applies the visible column order. Never mutates
+    /// `tableDocument` itself.
+    func documentSnapshotForSaveAs() -> TableDocument? {
+        endActiveCellTextInteraction(commit: true)
+        guard var current = tableDocument else { return nil }
         // Apply any pending visual column reorder so the written file matches what's shown.
         if documentColumnOrderDirty,
            let order = currentVisibleDataColumnOrder(in: current),
            order != Array(current.headers.indices) {
             current.reorderColumns(to: order)
         }
+        return current
+    }
+
+    func saveDocumentAs() {
+        guard let window, let current = documentSnapshotForSaveAs() else { return }
 
         let formats = TableFileFormat.writableFormats
         let defaultFormat = formats.contains(current.format) ? current.format : .csv
@@ -1988,6 +1996,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     /// True when it's safe to close: no unsaved edits, the user saved them here, or
     /// the user explicitly chose to discard them.
     func confirmDiscardingUnsavedChanges() -> Bool {
+        // ⌘Q reaches here without windowShouldClose; uncommitted editor text must
+        // count as an unsaved change, not vanish.
+        endActiveCellTextInteraction(commit: true)
         guard let tableDocument, tableDocument.dirty, !tableDocument.readOnly else { return true }
 
         let alert = NSAlert()

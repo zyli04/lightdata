@@ -175,6 +175,55 @@ final class MainWindowControllerTests: XCTestCase {
         XCTAssertTrue(onDisk.contains("changed"), "edits persisted to disk")
     }
 
+    // MARK: - Save with open editor
+
+    func testSaveWithOpenEditorWritesLatestText() throws {
+        let url = try openCSV()
+        enableEditing()
+        controller.selectCellRange(from: (0, visibleColumn(forData: 0)), to: (0, visibleColumn(forData: 0)))
+        controller.editSelectedCell(initialText: "Typed")
+        XCTAssertNotNil(controller.activeCellEditor)
+        controller.saveDocument()                          // ⌘S, editor still open
+        XCTAssertNil(controller.activeCellEditor)
+        XCTAssertEqual(controller.tableDocument?.dirty, false)
+        XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("Typed"))
+    }
+
+    func testSaveAsSnapshotIncludesOpenEditorText() throws {
+        try openCSV()
+        enableEditing()
+        controller.selectCellRange(from: (1, visibleColumn(forData: 2)), to: (1, visibleColumn(forData: 2)))
+        controller.editSelectedCell(initialText: "Paris")
+        let snapshot = try XCTUnwrap(controller.documentSnapshotForSaveAs())
+        XCTAssertEqual(snapshot.rows[1][2], "Paris")
+    }
+
+    func testQuitWithOpenEditorPromptsAndSavesTypedText() throws {
+        let url = try openCSV()                            // clean document
+        enableEditing()
+        controller.selectCellRange(from: (0, visibleColumn(forData: 0)), to: (0, visibleColumn(forData: 0)))
+        controller.editSelectedCell(initialText: "Typed")
+        var prompted = false
+        controller.presentAlert = { _ in prompted = true; return .alertFirstButtonReturn }  // Save
+        XCTAssertTrue(controller.confirmDiscardingUnsavedChanges())
+        XCTAssertTrue(prompted, "uncommitted text makes the doc dirty → must prompt")
+        XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("Typed"))
+    }
+
+    func testSaveWithInvalidTypedEditorKeepsOldValue() throws {
+        let url = try openCSV()
+        enableEditing()
+        controller.metadata.schemaEnabled = true
+        let doc = try XCTUnwrap(controller.tableDocument)
+        controller.schema.setType(.number, for: "age", sampleValues: doc.rows.map { $0[1] })
+        controller.selectCellRange(from: (0, visibleColumn(forData: 1)), to: (0, visibleColumn(forData: 1)))
+        controller.editSelectedCell(initialText: "abc")
+        XCTAssertNotNil(controller.activeCellEditor)
+        controller.saveDocument()
+        XCTAssertEqual(controller.tableDocument?.rows[0][1], "30")
+        XCTAssertFalse(try String(contentsOf: url, encoding: .utf8).contains("abc"))
+    }
+
     // MARK: - Column operations & undo consistency
 
     func testDeleteColumnIsUndoableAndRestoresValues() throws {
