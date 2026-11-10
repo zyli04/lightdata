@@ -6,7 +6,6 @@
 
 Double-click a file and see it, without opening a notebook.
 
-[![CI](https://github.com/zyli04/lightdata/actions/workflows/ci.yml/badge.svg)](https://github.com/zyli04/lightdata/actions/workflows/ci.yml)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-AppKit-orange)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -87,7 +86,7 @@ Scripts/test.sh core   # 83 core unit tests: parsers, paging, fuzzing, hostile f
 Scripts/test.sh app    # 32 integration tests driving real app windows
 ```
 
-The integration tests run inside the real app process and drive actual windows: editing, undo across saves, close and quit prompts, and lazy-mode copy. CI runs both suites on every push.
+The integration tests run inside the real app process and drive actual windows: editing, undo across saves, close and quit prompts, and lazy-mode copy.
 
 ## Roadmap
 
