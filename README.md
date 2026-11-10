@@ -1,47 +1,62 @@
 # LightData
 
-LightData is a lightweight local-first macOS data viewer/editor for structured files.
+[![CI](https://github.com/zyli04/lightdata/actions/workflows/ci.yml/badge.svg)](https://github.com/zyli04/lightdata/actions/workflows/ci.yml)
 
-## Current MVP
+A native macOS viewer for data files (CSV, TSV, JSON/JSONL, Parquet), built for people who work with data. Double-click a file and see it immediately, without starting a notebook.
 
-- Native macOS AppKit UI.
-- Opens `.csv`, `.tsv`, `.json`, `.jsonl`, basic `.xlsx`, and `.parquet` / `.pq` files.
-- CSV/TSV/JSON/JSONL support viewing, editing, search, filtering, sorting, and safe save.
-- XLSX and Parquet are read-only in this MVP. XLSX supports basic first-sheet viewing for normal workbooks; Parquet is loaded through DuckDB.
-- Per-file view and schema metadata are stored centrally under `~/Library/Application Support/LightData/Metadata`.
-  LightData uses the macOS file resource identifier when available, so metadata can usually survive file renames and moves on the same filesystem.
-- Xcode-based macOS app bundle (with Bundle ID, code signing, and file associations).
+**Status: alpha.** Viewing is the focus. Editing is limited to plain text formats and is still being hardened.
+
+## What it opens
+
+| Format | View | Edit |
+| --- | --- | --- |
+| CSV / TSV | ✓ search, filter, sort | ✓ cells, rows, columns; atomic save |
+| JSON / JSONL (array of objects) | ✓ nested values are flattened for display | Only when every value is a string. Files with numbers, booleans, nulls or nested values open read-only so saving can't change their types. |
+| Parquet (`.parquet`, `.pq`) | ✓ paged through DuckDB; only the visible rows and columns are read | Read-only. Search, filter and sort are not available yet. |
+| XLSX / XLS | ✓ first sheet | Read-only |
+
+Encodings: UTF-8 (with or without BOM) and GB18030/GBK. UTF-16 files open read-only.
+
+**Known limits:** very wide Parquet files (around 150 or more columns) stutter when scrolling, because the native table view doesn't virtualize columns. Parquet files written as a single huge row group are slow to jump deep into. Both are on the roadmap.
+
+## View memory
+
+Per-file view state (column widths, column order, sort and column types) is stored outside your data under `~/Library/Application Support/LightData/Metadata`. Records are keyed by file path, and a bookmark carries them over when a file is renamed or moved. Viewing a file never writes to it.
 
 ## Development
 
-Open the Xcode project:
+Requires Xcode 16 or later. The deployment target is macOS 13.
 
 ```sh
-open LightData.xcodeproj
+open LightData.xcodeproj   # scheme "LightData", target "My Mac", ⌘R
 ```
 
-Select the **LightData** scheme, target **My Mac**, then **⌘R** to build and run.
+- **LightDataCore/**: portable core library (parsers, table model, query/filter, schema, metadata, DuckDB paging). It has no AppKit dependency.
+- **App/**: macOS UI (AppKit). It depends on `LightDataCore` as a local Swift package.
+- **project.yml**: XcodeGen spec. Regenerate with `xcodegen generate` after changing the project structure.
 
-### Project structure
-
-- **LightDataCore/** — portable core library (parsers, table model, query/filter, schema, metadata). Zero AppKit dependencies; decoupled for future iOS / cross-platform reuse.
-- **App/** — macOS UI (AppKit). Depends on `LightDataCore` as a local Swift package.
-- **`project.yml`** — XcodeGen spec; if you change project structure, regenerate with `xcodegen generate`.
-
-### Quick Look generator
+### Running tests
 
 ```sh
-Scripts/build-quicklook.sh
+Scripts/test.sh        # core unit tests + app-hosted integration tests
+Scripts/test.sh core   # core only (fast, headless)
+Scripts/test.sh app    # integration tests drive real windows (they flash briefly)
 ```
 
-Install it for the current user:
+CI runs the same script on every push to `main` and on pull requests.
+
+### Quick Look
 
 ```sh
-Scripts/install-quicklook.sh
+Scripts/build-quicklook.sh && Scripts/install-quicklook.sh
 ```
 
-After installation, select a CSV, TSV, JSON, or JSONL file in Finder and press Space.
+After installing, select a CSV, TSV, JSON or JSONL file in Finder and press Space.
 
-## Scope Notes
+## Scope
 
-This is intentionally not a full Excel clone. The product target is quick local inspection and light editing of structured files with a clean, stable desktop UI.
+LightData is deliberately not a spreadsheet: it has no formulas, collaboration or workbook editing. The goal is to open, understand and lightly edit local structured data files quickly, natively and without corrupting them.
+
+## License
+
+[MIT](LICENSE)
