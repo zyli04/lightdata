@@ -12,7 +12,10 @@ Double-click a file and see it, without opening a notebook.
 ![Swift](https://img.shields.io/badge/Swift-AppKit-orange)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-![LightData showing a 20-million-row Parquet file](docs/images/screenshot.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-dark.png">
+  <img alt="LightData showing a 20-million-row Parquet file" src="docs/images/screenshot-light.png">
+</picture>
 
 </div>
 
